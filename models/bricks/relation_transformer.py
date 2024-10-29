@@ -4,6 +4,7 @@ import math
 
 import torch
 from torch import Tensor, nn
+import torch.nn.functional as F
 
 from models.bricks.misc import Conv2dNormActivation
 from models.bricks.base_transformer import TwostageTransformer

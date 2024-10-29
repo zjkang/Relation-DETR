@@ -19,13 +19,13 @@ find_unused_parameters = False  # useful for debugging distributed training
 # define dataset for train
 coco_path = "../data/COCO2017"  # /PATH/TO/YOUR/COCODIR
 train_dataset = CocoDetection(
-    img_folder=f"{coco_path}/train2017",
+    img_folder=f"{coco_path}/images/train2017",
     ann_file=f"{coco_path}/annotations/instances_train2017.json",
     transforms=presets.detr,  # see transforms/presets to choose a transform
     train=True,
 )
 test_dataset = CocoDetection(
-    img_folder=f"{coco_path}/val2017",
+    img_folder=f"{coco_path}/images/val2017",
     ann_file=f"{coco_path}/annotations/instances_val2017.json",
     transforms=None,  # the eval_transform is integrated in the model
 )
