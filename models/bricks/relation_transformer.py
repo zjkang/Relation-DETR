@@ -544,158 +544,312 @@ class PositionRelationEmbedding(nn.Module):
         return pos_embed.clone()
 
 
+# ------------------------------------------------------------
+# class MultiHeadCrossLayerHoughNetSpatialRelation(nn.Module):
+#     def __init__(
+#             self, 
+#             embed_dim, 
+#             num_heads, 
+#             num_votes,
+#             embed_pos_dim=16,
+#             hidden_dim=32,#256,
+#             temperature=10000.,
+#             scale=100.,
+#             activation_layer=nn.ReLU,
+#             inplace=True):
+#         super().__init__()
+#         self.embed_dim = embed_dim
+#         self.num_heads = num_heads
+#         self.num_votes = num_votes
+#         self.hidden_dim = hidden_dim
+        
+#         self.vote_generator = MLP(
+#             self.embed_dim, 
+#             self.hidden_dim, 
+#             self.num_votes * 2, 
+#             1)
+
+#         self.pos_proj = Conv2dNormActivation(
+#             embed_pos_dim * 1, # (center_x, center_y, w, h, score) -> (score)
+#             num_heads,
+#             kernel_size=1,
+#             inplace=inplace,
+#             norm_layer=None,
+#             activation_layer=activation_layer,
+#         )
+#         # This creates a partial function for generating sinusoidal position embeddings
+#         self.pos_func = functools.partial(
+#             get_sine_pos_embed,
+#             num_pos_feats=embed_pos_dim, # embed_dim
+#             temperature=temperature,
+#             scale=scale,
+#             exchange_xy=False,
+#         )
+        
+#         # # 投票聚合器
+#         # self.vote_aggregator = nn.Sequential(
+#         #     nn.Conv2d(num_votes, hidden_dim, kernel_size=3, padding=1),
+#         #     nn.ReLU(),
+#         #     nn.Conv2d(hidden_dim, num_heads, kernel_size=1)
+#         # )
+        
+#         # # 关系编码器 (现在为每个头生成单独的关系)
+#         # self.relation_encoder = nn.Sequential(
+#         #     nn.Linear(9*num_heads, hidden_dim),  # 9 * num_heads = 1 (aggregated vote) + 4 (current box) + 4 (previous box)
+#         #     nn.ReLU(),
+#         #     nn.Linear(hidden_dim, num_heads)
+#         # )
+
+#     def forward(self, queries, current_ref_points, prev_ref_points):
+#         """
+#         Args:
+#         - queries: Tensor of shape [batch_size, num_queries, embed_dim]
+#         - current_ref_points: Tensor of shape [batch_size, num_queries, 4]
+#         - prev_ref_points: Tensor of shape [batch_size, num_queries, 4]
+        
+#         Returns:
+#         - attention_mask: Tensor of shape [batch_size, num_heads, num_queries, num_queries]
+#         """
+#         batch_size, num_queries, _ = queries.shape
+        
+#         # 生成投票
+#         # votes = self.vote_generator(queries).view(batch_size, num_queries, self.num_votes, 2)
+#         # current_ref = current_ref_points[:, :, :2].unsqueeze(2)  # (batch_size, num_queries, 1, 2)
+#         # vote_positions = current_ref + votes  # (batch_size, num_queries, num_votes, 2)
+#         vote_positions = current_ref_points[:, :, :2].unsqueeze(2) + \
+#             self.vote_generator(queries).view(batch_size, num_queries, self.num_votes, 2)
+
+#         # influence_map: [batch_size, num_queries, num_queries]
+#         influence_map = self.create_influence_map(vote_positions, current_ref_points)
+#         # del vote_positions
+
+#         # temporarily disable
+#         # with torch.no_grad():
+#         #     # pos_embed: [batch_size, num_boxes1, num_boxes2, 4]
+#         #     pos_embed = box_rel_encoding(prev_ref_points, current_ref_points)
+
+        
+#         # 将 influence_map 扩展一个维度以匹配 pos_embed 的形状
+#         # influence_map_expanded = influence_map.unsqueeze(-1)  # [batch_size, num_queries, num_queries, 1]
+#         # 拼接 influence_map 和 pos_embed
+#         # fused_embed = torch.cat([influence_map.unsqueeze(-1), pos_embed], dim=-1)  # [batch_size, num_queries, num_queries, 5]
+        
+#         # # 如果需要，可以通过一个线性层来融合这些特征
+#         # fusion_layer = nn.Linear(5, output_dim)  # 创建一个线性层来融合特征
+#         # fused_embed = fusion_layer(fused_embed)  # [batch_size, num_queries, num_queries, output_dim]
+#         # 如果需要用于注意力机制，可能还需要重塑维度
+#         # fused_embed = fused_embed.permute(0, 3, 1, 2)  # [batch_size, output_dim, num_queries, num_queries]
+        
+#         # fused_embed: [batch_size, 5 * embed_dim, num_boxes1, num_boxes2]
+#         # fused_embed = self.pos_func(fused_embed).permute(0, 3, 1, 2)
+#         # fused_embed: [batch_size, num_heads, num_boxes1, num_boxes2]
+#         # fused_embed = self.pos_proj(fused_embed)
+
+#         # # 直接计算 fused_embed，不存储中间结果
+#         # fused_embed = self.pos_proj(
+#         #     self.pos_func(torch.cat(
+#         #         [influence_map.unsqueeze(-1), pos_embed], dim=-1)).permute(0, 3, 1, 2))
+
+
+#         fused_embed = self.pos_proj(
+#             self.pos_func(torch.cat(
+#                 [influence_map.unsqueeze(-1)], dim=-1)).permute(0, 3, 1, 2))
+#         # del influence_map, pos_embed
+
+#         return fused_embed.clone()
+
+
+#     def create_influence_map(self, vote_positions, reference_points):
+#         """
+#         创建影响图
+        
+#         Args:
+#         - vote_positions: [batch_size, num_queries, num_votes, 2]
+#         - reference_points: [batch_size, num_queries, 4] (x_center, y_center, width, height)
+        
+#         Returns:
+#         - influence_map: [batch_size, num_queries, num_queries]
+#         """
+#         batch_size, num_queries, num_votes, _ = vote_positions.shape
+        
+#         # 提取参考点的中心坐标
+#         reference_centers = reference_points[:, :, :2]  # [batch_size, num_queries, 2]
+        
+#         # 将投票位置和参考中心点展平
+#         vote_positions_flat = vote_positions.view(batch_size, num_queries * num_votes, 2)
+#         reference_centers_flat = reference_centers.unsqueeze(2).expand(-1, -1, num_votes, -1).reshape(batch_size, num_queries * num_votes, 2)
+        
+#         # 计算每个投票到每个参考中心点的距离
+#         distances = torch.cdist(vote_positions_flat, reference_centers, p=2)  # [batch_size, num_queries * num_votes, num_queries]
+        
+#         # 使用参考点的宽度和高度来调整 sigma
+#         reference_sizes = reference_points[:, :, 2:]  # [batch_size, num_queries, 2] (width, height)
+#         sigma = reference_sizes.mean(dim=-1, keepdim=True) / 2  # [batch_size, num_queries, 1]
+#         sigma = sigma.repeat(1, num_votes, 1).view(batch_size, num_queries * num_votes, 1)  # [batch_size, num_queries * num_votes, 1]
+#         # 使用自适应高斯核将距离转换为影响分数
+#         influence_scores = torch.exp(-distances**2 / (2 * sigma**2))
+        
+#         # 重塑并求和得到最终的影响图
+#         influence_map = influence_scores.view(batch_size, num_queries, num_votes, num_queries).sum(dim=2)
+        
+#         # 归一化影响图
+#         influence_map = F.normalize(influence_map, p=1, dim=2)
+
+#         # can improve from 41.0 to 41.8
+#         influence_map = 1.0 - influence_map
+#         # influence_map = -10000.0 * (1.0 - influence_map)
+#         # [batch_size, num_queries, num_queries]
+#         return influence_map
+# -------------------------------------------------------------------
+
+
 class MultiHeadCrossLayerHoughNetSpatialRelation(nn.Module):
     def __init__(
             self, 
             embed_dim, 
             num_heads, 
             num_votes,
-            embed_pos_dim=16,
-            hidden_dim=32,#256,
+            hidden_dim=256,
             temperature=10000.,
-            scale=100.,
-            activation_layer=nn.ReLU,
-            inplace=True):
+            scale=100.):
         super().__init__()
         self.embed_dim = embed_dim
         self.num_heads = num_heads
         self.num_votes = num_votes
         self.hidden_dim = hidden_dim
         
-        self.vote_generator = MLP(
-            self.embed_dim, 
-            self.hidden_dim, 
-            self.num_votes * 2, 
-            1)
-
-        self.pos_proj = Conv2dNormActivation(
-            embed_pos_dim * 1, # (center_x, center_y, w, h, score) -> (score)
-            num_heads,
-            kernel_size=1,
-            inplace=inplace,
-            norm_layer=None,
-            activation_layer=activation_layer,
+        # 1. 当前层的投票生成器
+        self.curr_vote_generator = nn.Sequential(
+            nn.Linear(embed_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, num_votes * 2)
         )
-        # This creates a partial function for generating sinusoidal position embeddings
+        
+        # 2. 跨层特征融合
+        self.cross_layer_fusion = nn.Sequential(
+            nn.Linear(embed_dim * 2, hidden_dim),  # 融合当前层和前一层的特征
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim)
+        )
+        
+        # 3. 位置编码
         self.pos_func = functools.partial(
             get_sine_pos_embed,
-            num_pos_feats=embed_pos_dim, # embed_dim
+            num_pos_feats=hidden_dim,
             temperature=temperature,
             scale=scale,
             exchange_xy=False,
         )
         
-        # # 投票聚合器
-        # self.vote_aggregator = nn.Sequential(
-        #     nn.Conv2d(num_votes, hidden_dim, kernel_size=3, padding=1),
-        #     nn.ReLU(),
-        #     nn.Conv2d(hidden_dim, num_heads, kernel_size=1)
-        # )
-        
-        # # 关系编码器 (现在为每个头生成单独的关系)
-        # self.relation_encoder = nn.Sequential(
-        #     nn.Linear(9*num_heads, hidden_dim),  # 9 * num_heads = 1 (aggregated vote) + 4 (current box) + 4 (previous box)
-        #     nn.ReLU(),
-        #     nn.Linear(hidden_dim, num_heads)
-        # )
+        # 4. 最终的多头注意力权重生成
+        self.attention_proj = Conv2dNormActivation(
+            hidden_dim * 2,  # 当前空间信息 + 跨层空间信息 #+ 语义信息
+            num_heads,
+            kernel_size=1,
+            norm_layer=None,
+            activation_layer=nn.ReLU
+        )
 
-    def forward(self, queries, current_ref_points, prev_ref_points):
+    def forward(self, curr_queries, curr_ref_points, prev_queries=None, prev_ref_points=None):
         """
         Args:
-        - queries: Tensor of shape [batch_size, num_queries, embed_dim]
-        - current_ref_points: Tensor of shape [batch_size, num_queries, 4]
-        - prev_ref_points: Tensor of shape [batch_size, num_queries, 4]
-        
-        Returns:
-        - attention_mask: Tensor of shape [batch_size, num_heads, num_queries, num_queries]
+            curr_queries: 当前层的queries [batch_size, num_queries, embed_dim]
+            curr_ref_points: 当前层的参考点 [batch_size, num_queries, 4]
+            prev_queries: 上一层的queries [batch_size, num_queries, embed_dim]
+            prev_ref_points: 上一层的参考点 [batch_size, num_queries, 4]
         """
+        batch_size, num_queries, _ = curr_queries.shape
+        
+        # 1. 当前层的空间关系
+        curr_influence_map = self.compute_layer_influence(
+            curr_queries, 
+            curr_ref_points, 
+            self.curr_vote_generator
+        )
+        
+        # 2. 跨层空间关系
+        if prev_queries is not None and prev_ref_points is not None:
+            cross_layer_influence = self.compute_cross_layer_influence(
+                curr_queries, curr_ref_points,
+                prev_queries, prev_ref_points
+            )
+        else:
+            cross_layer_influence = torch.zeros_like(curr_influence_map)
+        
+        # 3. 语义关系
+        # semantic_map = self.create_semantic_map(curr_queries, prev_queries)
+        
+        # 4. 融合所有关系
+        fused_relation = self.fuse_all_relations(
+            curr_influence_map, 
+            cross_layer_influence, 
+            # semantic_map
+        )
+        
+        return fused_relation.clone()
+
+    def compute_layer_influence(self, queries, ref_points, vote_generator):
+        """计算单层内的影响图"""
         batch_size, num_queries, _ = queries.shape
         
         # 生成投票
-        # votes = self.vote_generator(queries).view(batch_size, num_queries, self.num_votes, 2)
-        # current_ref = current_ref_points[:, :, :2].unsqueeze(2)  # (batch_size, num_queries, 1, 2)
-        # vote_positions = current_ref + votes  # (batch_size, num_queries, num_votes, 2)
-        vote_positions = current_ref_points[:, :, :2].unsqueeze(2) + \
-            self.vote_generator(queries).view(batch_size, num_queries, self.num_votes, 2)
+        vote_offsets = vote_generator(queries)
+        vote_offsets = vote_offsets.view(batch_size, num_queries, self.num_votes, 2)
+        
+        # 使用box尺寸约束投票范围
+        box_sizes = ref_points[:, :, 2:]
+        vote_offsets = vote_offsets * box_sizes.unsqueeze(2) * 0.5
+        
+        # 生成投票位置
+        vote_positions = ref_points[:, :, :2].unsqueeze(2) + vote_offsets
+        
+        return self.create_influence_map(vote_positions, ref_points)
 
-        # influence_map: [batch_size, num_queries, num_queries]
-        influence_map = self.create_influence_map(vote_positions, current_ref_points)
-        # del vote_positions
+    def compute_cross_layer_influence(self, curr_queries, curr_ref_points, 
+                                    prev_queries, prev_ref_points):
+        """计算跨层影响"""
+        # 1. 计算特征相似度
+        curr_feat = F.normalize(curr_queries, p=2, dim=-1)
+        prev_feat = F.normalize(prev_queries, p=2, dim=-1)
+        feat_sim = torch.bmm(curr_feat, prev_feat.transpose(1, 2))
+        
+        # 2. 计算空间关系
+        pos_embed = box_rel_encoding(prev_ref_points, curr_ref_points)
+        pos_embed = self.pos_func(pos_embed)
+        
+        # 3. 融合特征相似度和空间关系
+        cross_influence = self.cross_layer_fusion(
+            torch.cat([feat_sim.unsqueeze(-1), pos_embed], dim=-1)
+        )
+        
+        return cross_influence
 
-        # temporarily disable
-        # with torch.no_grad():
-        #     # pos_embed: [batch_size, num_boxes1, num_boxes2, 4]
-        #     pos_embed = box_rel_encoding(prev_ref_points, current_ref_points)
+    # def create_semantic_map(self, curr_queries, prev_queries=None):
+    #     """计算语义相似度图"""
+    #     batch_size, num_queries, dim = curr_queries.shape
+        
+    #     # 当前层的语义相似度
+    #     curr_norm = F.normalize(curr_queries, p=2, dim=-1)
+    #     semantic_map = torch.bmm(curr_norm, curr_norm.transpose(1, 2))
+        
+    #     # 如果有前一层，加入跨层语义信息
+    #     if prev_queries is not None:
+    #         prev_norm = F.normalize(prev_queries, p=2, dim=-1)
+    #         cross_semantic = torch.bmm(curr_norm, prev_norm.transpose(1, 2))
+    #         semantic_map = semantic_map + cross_semantic
+            
+    #     return semantic_map
 
+    def fuse_all_relations(self, curr_influence, cross_influence, semantic_map):
+        """融合所有关系信息"""
+        # 1. 编码各种关系
+        curr_embed = self.pos_func(curr_influence.unsqueeze(-1))
+        cross_embed = self.pos_func(cross_influence.unsqueeze(-1))
+        semantic_embed = self.pos_func(semantic_map.unsqueeze(-1))
         
-        # 将 influence_map 扩展一个维度以匹配 pos_embed 的形状
-        # influence_map_expanded = influence_map.unsqueeze(-1)  # [batch_size, num_queries, num_queries, 1]
-        # 拼接 influence_map 和 pos_embed
-        # fused_embed = torch.cat([influence_map.unsqueeze(-1), pos_embed], dim=-1)  # [batch_size, num_queries, num_queries, 5]
+        # 2. 拼接并投影
+        fused_embed = torch.cat([curr_embed, cross_embed, semantic_embed], dim=-1)
+        fused_embed = fused_embed.permute(0, 3, 1, 2)
+        attention_weights = self.attention_proj(fused_embed)
         
-        # # 如果需要，可以通过一个线性层来融合这些特征
-        # fusion_layer = nn.Linear(5, output_dim)  # 创建一个线性层来融合特征
-        # fused_embed = fusion_layer(fused_embed)  # [batch_size, num_queries, num_queries, output_dim]
-        # 如果需要用于注意力机制，可能还需要重塑维度
-        # fused_embed = fused_embed.permute(0, 3, 1, 2)  # [batch_size, output_dim, num_queries, num_queries]
-        
-        # fused_embed: [batch_size, 5 * embed_dim, num_boxes1, num_boxes2]
-        # fused_embed = self.pos_func(fused_embed).permute(0, 3, 1, 2)
-        # fused_embed: [batch_size, num_heads, num_boxes1, num_boxes2]
-        # fused_embed = self.pos_proj(fused_embed)
-
-        # # 直接计算 fused_embed，不存储中间结果
-        # fused_embed = self.pos_proj(
-        #     self.pos_func(torch.cat(
-        #         [influence_map.unsqueeze(-1), pos_embed], dim=-1)).permute(0, 3, 1, 2))
-
-
-        fused_embed = self.pos_proj(
-            self.pos_func(torch.cat(
-                [influence_map.unsqueeze(-1)], dim=-1)).permute(0, 3, 1, 2))
-        # del influence_map, pos_embed
-
-        return fused_embed.clone()
-
-
-    def create_influence_map(self, vote_positions, reference_points):
-        """
-        创建影响图
-        
-        Args:
-        - vote_positions: [batch_size, num_queries, num_votes, 2]
-        - reference_points: [batch_size, num_queries, 4] (x_center, y_center, width, height)
-        
-        Returns:
-        - influence_map: [batch_size, num_queries, num_queries]
-        """
-        batch_size, num_queries, num_votes, _ = vote_positions.shape
-        
-        # 提取参考点的中心坐标
-        reference_centers = reference_points[:, :, :2]  # [batch_size, num_queries, 2]
-        
-        # 将投票位置和参考中心点展平
-        vote_positions_flat = vote_positions.view(batch_size, num_queries * num_votes, 2)
-        reference_centers_flat = reference_centers.unsqueeze(2).expand(-1, -1, num_votes, -1).reshape(batch_size, num_queries * num_votes, 2)
-        
-        # 计算每个投票到每个参考中心点的距离
-        distances = torch.cdist(vote_positions_flat, reference_centers, p=2)  # [batch_size, num_queries * num_votes, num_queries]
-        
-        # 使用参考点的宽度和高度来调整 sigma
-        reference_sizes = reference_points[:, :, 2:]  # [batch_size, num_queries, 2] (width, height)
-        sigma = reference_sizes.mean(dim=-1, keepdim=True) / 2  # [batch_size, num_queries, 1]
-        sigma = sigma.repeat(1, num_votes, 1).view(batch_size, num_queries * num_votes, 1)  # [batch_size, num_queries * num_votes, 1]
-        # 使用自适应高斯核将距离转换为影响分数
-        influence_scores = torch.exp(-distances**2 / (2 * sigma**2))
-        
-        # 重塑并求和得到最终的影响图
-        influence_map = influence_scores.view(batch_size, num_queries, num_votes, num_queries).sum(dim=2)
-        
-        # 归一化影响图
-        influence_map = F.normalize(influence_map, p=1, dim=2)
-
-        # can improve from 41.0 to 41.8
-        influence_map = 1.0 - influence_map
-        # influence_map = -10000.0 * (1.0 - influence_map)
-        # [batch_size, num_queries, num_queries]
-        return influence_map
+        return attention_weights
