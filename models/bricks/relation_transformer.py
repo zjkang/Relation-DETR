@@ -5,6 +5,7 @@ import math
 import torch
 from torch import Tensor, nn
 import torch.nn.functional as F
+from typing import Optional
 
 from models.bricks.misc import Conv2dNormActivation
 from models.bricks.base_transformer import TwostageTransformer
@@ -305,7 +306,8 @@ class RelationTransformerDecoder(nn.Module):
         # self.position_relation_embedding = MultiHeadCrossLayerHoughNetSpatialRelation(
         #     self.embed_dim, self.num_heads, self.num_votes)
         # self.position_relation_embedding = DualLayerBoxRelationEncoder(self.embed_dim, 16, self.num_heads)
-        self.position_relation_embedding = PositionRelationEmbeddingV2(16, self.num_heads)
+        # self.position_relation_embedding = PositionRelationEmbeddingV2(16, self.num_heads)
+        self.position_relation_embedding = WeightedLayerBoxRelationEncoder(16, self.num_heads, num_layers=self.num_layers)
 
         self.init_weights()
 
@@ -342,7 +344,7 @@ class RelationTransformerDecoder(nn.Module):
         pos_relation = attn_mask  # fallback pos_relation to attn_mask
         # NOTE: for changes not related to previous boxes, skip_relation is True
         if not skip_relation:
-            pos_relation = self.position_relation_embedding(reference_points).flatten(0, 1)
+            pos_relation = self.position_relation_embedding(reference_points, 0).flatten(0, 1)
             if attn_mask is not None:
                 pos_relation.masked_fill_(attn_mask, float("-inf"))
 
@@ -391,7 +393,7 @@ class RelationTransformerDecoder(nn.Module):
             if not skip_relation:
                 # src_boxes = tgt_boxes if layer_idx >= 1 else reference_points
                 tgt_boxes = output_coord
-                pos_relation = self.position_relation_embedding(tgt_boxes).flatten(0, 1)
+                pos_relation = self.position_relation_embedding(tgt_boxes, layer_idx + 1).flatten(0, 1)
                 if attn_mask is not None:
                     pos_relation.masked_fill_(attn_mask, float("-inf"))
 
@@ -981,8 +983,10 @@ class WeightedLayerBoxRelationEncoder(nn.Module):
         )
 
         # 添加层级权重参数
-        self.layer_weights = nn.Parameter(torch.ones(num_layers, 3))  # 3个权重分别对应距离、尺度和方向
+        self.layer_weights = nn.Parameter(torch.ones(num_layers, 3) + torch.randn(num_layers, 3) * 0.02)
+        # self.layer_weights = nn.Parameter(torch.ones(num_layers, 3))  # 3个权重分别对应距离、尺度和方向
         self.num_layers = num_layers
+        self.embed_dim = embed_dim
         self.register_buffer('layer_idx', torch.zeros(1, dtype=torch.long))
         self.eps = 1e-5
 
@@ -995,10 +999,9 @@ class WeightedLayerBoxRelationEncoder(nn.Module):
         curr_layer = self.layer_idx.item() if layer_idx is None else layer_idx
         curr_layer = min(curr_layer, self.num_layers - 1)
 
-        # 获取当前层的权重
-        distance_weight = torch.sigmoid(self.layer_weights[curr_layer, 0])
-        scale_weight = torch.sigmoid(self.layer_weights[curr_layer, 1])
-        direction_weight = torch.sigmoid(self.layer_weights[curr_layer, 2])
+        # 获取当前层的权重 - 在no_grad外部计算权重
+        weights = torch.sigmoid(self.layer_weights[curr_layer])
+        distance_weight, scale_weight, direction_weight = weights[0], weights[1], weights[2]
 
         with torch.no_grad():
             xy1, wh1 = src_boxes.split([2, 2], -1)
@@ -1033,14 +1036,34 @@ class WeightedLayerBoxRelationEncoder(nn.Module):
                 torch.sin(theta / angle_scale)
             ], dim=-1)
 
-            # 组合特征
-            pos_embed = torch.cat([
-                normalized_distance * distance_weight,  # [B, N, N, 2]
-                normalized_wh * scale_weight,           # [B, N, N, 2]
-                dir_embed * direction_weight,          # [B, N, N, 2]
+            # 将所有基础特征组合在一起
+            base_features = torch.cat([
+                normalized_distance,
+                normalized_wh,
+                dir_embed,
             ], dim=-1)
 
-            pos_embed = self.pos_func(pos_embed).permute(0, 3, 1, 2)
+            # 转换为所需的格式
+            base_features = self.pos_func(base_features).permute(0, 3, 1, 2)
+
+        pos_embed = base_features * torch.cat([
+                distance_weight.view(1, 1, 1, 1).expand(-1, self.embed_dim * 2, -1, -1),
+                scale_weight.view(1, 1, 1, 1).expand(-1, self.embed_dim * 2, -1, -1),
+                direction_weight.view(1, 1, 1, 1).expand(-1, self.embed_dim * 2, -1, -1)
+            ], dim=1)
+
+        # # 克隆基础特征以确保新的计算图
+        # base_features = base_features.clone()
+
+        # # 组合特征
+        # pos_embed = torch.cat([
+        #     normalized_distance * distance_weight,  # [B, N, N, 2]
+        #     normalized_wh * scale_weight,           # [B, N, N, 2]
+        #     dir_embed * direction_weight,          # [B, N, N, 2]
+        # ], dim=-1)
+
+        # with torch.no_grad():
+        #     pos_embed = self.pos_func(pos_embed).permute(0, 3, 1, 2)
 
         pos_embed = self.pos_proj(pos_embed)
 
