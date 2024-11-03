@@ -303,11 +303,11 @@ class RelationTransformerDecoder(nn.Module):
 
         # relation embedding
         # self.position_relation_embedding = PositionRelationEmbedding(16, self.num_heads)
-        # self.position_relation_embedding = MultiHeadCrossLayerHoughNetSpatialRelation(
-        #     self.embed_dim, self.num_heads, self.num_votes)
+        # self.position_relation_embedding = MultiHeadCrossLayerHoughNetSpatialRelation(self.embed_dim, self.num_heads, self.num_votes)
         # self.position_relation_embedding = DualLayerBoxRelationEncoder(self.embed_dim, 16, self.num_heads)
         # self.position_relation_embedding = PositionRelationEmbeddingV2(16, self.num_heads)
-        self.position_relation_embedding = WeightedLayerBoxRelationEncoder(16, self.num_heads, num_layers=self.num_layers)
+        # self.position_relation_embedding = WeightedLayerBoxRelationEncoder(16, self.num_heads, num_layers=self.num_layers)
+        self.position_relation_embedding = PositionRelationEmbeddingV3(16, self.num_heads, num_layers=self.num_layers)
 
         self.init_weights()
 
@@ -343,10 +343,10 @@ class RelationTransformerDecoder(nn.Module):
 
         pos_relation = attn_mask  # fallback pos_relation to attn_mask
         # NOTE: for changes not related to previous boxes, skip_relation is True
-        if not skip_relation:
-            pos_relation = self.position_relation_embedding(reference_points, 0).flatten(0, 1)
-            if attn_mask is not None:
-                pos_relation.masked_fill_(attn_mask, float("-inf"))
+        # if not skip_relation:
+        #     pos_relation = self.position_relation_embedding(reference_points, 0).flatten(0, 1)
+        #     if attn_mask is not None:
+        #         pos_relation.masked_fill_(attn_mask, float("-inf"))
 
         for layer_idx, layer in enumerate(self.layers):
             reference_points_input = reference_points.detach()[:, :, None] * valid_ratio_scale
@@ -381,21 +381,21 @@ class RelationTransformerDecoder(nn.Module):
 
             # calculate position relation embedding
             # NOTE: prevent memory leak like denoising, or introduce totally separate groups?
-            # if not skip_relation:
-            #     src_boxes = tgt_boxes if layer_idx >= 1 else reference_points
-            #     tgt_boxes = output_coord
-            #     pos_relation = self.position_relation_embedding(src_boxes, tgt_boxes).flatten(0, 1)
-            #     if attn_mask is not None:
-            #         pos_relation.masked_fill_(attn_mask, float("-inf"))
+            if not skip_relation:
+                src_boxes = tgt_boxes if layer_idx >= 1 else reference_points
+                tgt_boxes = output_coord
+                pos_relation = self.position_relation_embedding(src_boxes, tgt_boxes, layer_idx + 1).flatten(0, 1)
+                if attn_mask is not None:
+                    pos_relation.masked_fill_(attn_mask, float("-inf"))
 
 
             # my possible relation embedding
-            if not skip_relation:
-                # src_boxes = tgt_boxes if layer_idx >= 1 else reference_points
-                tgt_boxes = output_coord
-                pos_relation = self.position_relation_embedding(tgt_boxes, layer_idx + 1).flatten(0, 1)
-                if attn_mask is not None:
-                    pos_relation.masked_fill_(attn_mask, float("-inf"))
+            # if not skip_relation:
+                # # src_boxes = tgt_boxes if layer_idx >= 1 else reference_points
+                # tgt_boxes = output_coord
+                # pos_relation = self.position_relation_embedding(tgt_boxes, layer_idx + 1).flatten(0, 1)
+                # if attn_mask is not None:
+                #     pos_relation.masked_fill_(attn_mask, float("-inf"))
 
 
             # iterative bounding box refinement
@@ -604,7 +604,104 @@ class PositionRelationEmbeddingV2(nn.Module):
 
         return pos_embed.clone()
 # --------------------------------------------------------------------------------------------------
+def box_rel_encodingV3(src_boxes, tgt_boxes, curr_layer, num_layers, eps=1e-5):
+    # construct position relation
+    xy1, wh1 = src_boxes.split([2, 2], -1)
+    xy2, wh2 = tgt_boxes.split([2, 2], -1)
 
+    delta_xy = torch.abs(xy1.unsqueeze(-2) - xy2.unsqueeze(-3))
+    distance_scale = 1.0 + curr_layer / num_layers
+    delta_xy = torch.log(delta_xy / ((wh1.unsqueeze(-2) + eps) * distance_scale) + 1.0)
+
+    scale_scale = 1.0 + curr_layer / num_layers
+    delta_wh = torch.log((wh1.unsqueeze(-2) + eps) / ((wh2.unsqueeze(-3) + eps) * scale_scale))
+    pos_embed = torch.cat([delta_xy, delta_wh], -1)  # [batch_size, num_boxes1, num_boxes2, 4]
+
+    return pos_embed
+
+    # # 1. 距离特征（使用log，并保持层次自适应）
+    # delta_xy = torch.abs(xy1.unsqueeze(-2) - xy2.unsqueeze(-3))
+    # scale = wh1.mean(dim=-1, keepdim=True).unsqueeze(-2)
+    # distance_scale = 1.0 + curr_layer / self.num_layers
+    # # 分别计算x和y方向的注意力: exp function
+    # normalized_distance = torch.exp(-delta_xy / (scale * distance_scale))  # [B, N, N, 2] -> [0,1]
+    # # or 修改：使用负的log，这样距离越小，值越大
+    # # normalized_distance = -torch.log(delta_xy / (scale * distance_scale) + 1.0)
+
+    # # 2. 尺度特征（使用log）
+    # # (a) 计算宽高比例
+    # wh_ratio = torch.abs(torch.log(
+    #     (wh1.unsqueeze(-2) + self.eps) / (wh2.unsqueeze(-3) + self.eps)))  # [B, N, N, 2]
+    # # 使用exp将其映射到(0,1]范围
+    # scale_scale = 1.0 + curr_layer / self.num_layers
+    # normalized_wh = torch.exp(-wh_ratio / scale_scale)
+    # # (b) 使用log
+    # # delta_wh = torch.log((wh1.unsqueeze(-2) + self.eps) / (wh2.unsqueeze(-3) + self.eps))
+
+
+class PositionRelationEmbeddingV3(nn.Module):
+    def __init__(
+        self,
+        embed_dim=256,
+        num_heads=8,
+        temperature=10000.,
+        scale=100.,
+        activation_layer=nn.ReLU,
+        inplace=True,
+        num_layers=6,
+    ):
+        super().__init__()
+        self.pos_proj = Conv2dNormActivation(
+            embed_dim * 4,
+            num_heads,
+            kernel_size=1,
+            inplace=inplace,
+            norm_layer=None,
+            activation_layer=activation_layer,
+        )
+        self.pos_func = functools.partial(
+            get_sine_pos_embed,
+            num_pos_feats=embed_dim,
+            temperature=temperature,
+            scale=scale,
+            exchange_xy=False,
+        )
+        # 添加层级权重参数
+        self.layer_weights = nn.Parameter(torch.ones(num_layers, 2) + torch.randn(num_layers, 2) * 0.02)
+        # self.layer_weights = nn.Parameter(torch.ones(num_layers, 2))  # 2个权重分别对应距离、尺度
+        self.num_layers = num_layers
+        self.embed_dim = embed_dim
+        self.register_buffer('layer_idx', torch.zeros(1, dtype=torch.long))
+        self.eps = 1e-5
+
+    def forward(self, src_boxes: Tensor, tgt_boxes: Tensor = None, layer_idx: int = 0):
+        if tgt_boxes is None:
+            tgt_boxes = src_boxes
+        # src_boxes: [batch_size, num_boxes1, 4]
+        # tgt_boxes: [batch_size, num_boxes2, 4]
+        torch._assert(src_boxes.shape[-1] == 4, f"src_boxes much have 4 coordinates")
+        torch._assert(tgt_boxes.shape[-1] == 4, f"tgt_boxes must have 4 coordinates")
+
+        # 使用当前层索引或传入的层索引
+        curr_layer = self.layer_idx.item() if layer_idx is None else layer_idx
+        curr_layer = min(curr_layer, self.num_layers - 1)
+
+        # 获取当前层的权重 - 在no_grad外部计算权重
+        weights = torch.sigmoid(self.layer_weights[curr_layer])
+        distance_weight, scale_weight = weights[0], weights[1]
+
+        with torch.no_grad():
+            pos_embed = box_rel_encodingV3(src_boxes, tgt_boxes, curr_layer, self.num_layers)
+            pos_embed = self.pos_func(pos_embed).permute(0, 3, 1, 2)
+        
+        pos_embed = pos_embed * torch.cat([
+            distance_weight.view(1, 1, 1, 1).expand(-1, self.embed_dim * 2, -1, -1),
+            scale_weight.view(1, 1, 1, 1).expand(-1, self.embed_dim * 2, -1, -1)
+        ], dim=1)
+
+        pos_embed = self.pos_proj(pos_embed)
+
+        return pos_embed.clone()
 
 # --------------------------------------------------------------------------------------------------
 # START: decoder-hough-only (decoder hough relation) - ap: 51.3
