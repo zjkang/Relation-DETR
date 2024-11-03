@@ -343,10 +343,10 @@ class RelationTransformerDecoder(nn.Module):
 
         pos_relation = attn_mask  # fallback pos_relation to attn_mask
         # NOTE: for changes not related to previous boxes, skip_relation is True
-        # if not skip_relation:
-        #     pos_relation = self.position_relation_embedding(reference_points, 0).flatten(0, 1)
-        #     if attn_mask is not None:
-        #         pos_relation.masked_fill_(attn_mask, float("-inf"))
+        if not skip_relation:
+            pos_relation = self.position_relation_embedding(reference_points, None, layer_idx=0).flatten(0, 1)
+            if attn_mask is not None:
+                pos_relation.masked_fill_(attn_mask, float("-inf"))
 
         for layer_idx, layer in enumerate(self.layers):
             reference_points_input = reference_points.detach()[:, :, None] * valid_ratio_scale
