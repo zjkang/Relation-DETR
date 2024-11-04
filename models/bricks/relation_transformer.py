@@ -942,7 +942,8 @@ def box_iou(boxes1, boxes2):
 
 
 # --------------------------------------------------------------------------------------------------
-# START (In Progress): decoder-mul-relation with weighted layer-wise relation
+# START (In Progress): decoder-mul-relation with weighted layer-wise relation V2
+# ignore local attention in higher layer
 # 层级自适应权重:
 #   添加可学习的层级权重参数 layer_weights
 #   对距离、scale和方向特征分别应用不同的权重
@@ -965,7 +966,7 @@ class WeightedLayerBoxRelationEncoder(nn.Module):
     ):
         super().__init__()
         self.pos_proj = Conv2dNormActivation(
-            embed_dim * 6,  # 6 = 2(距离) + 2(尺度) + 2(方向)
+            embed_dim * 7,  # 6 = 2(距离) + 2(尺度) + 2(方向) + 1(IoU)
             num_heads,
             kernel_size=1,
             inplace=inplace,
@@ -986,6 +987,11 @@ class WeightedLayerBoxRelationEncoder(nn.Module):
         self.register_buffer('layer_idx', torch.zeros(1, dtype=torch.long))
         self.eps = 1e-5
 
+    # original:
+    # delta_xy = torch.abs(xy1.unsqueeze(-2) - xy2.unsqueeze(-3))
+    # delta_xy = torch.log(delta_xy / (wh1.unsqueeze(-2) + eps) + 1.0)
+    # delta_wh = torch.log((wh1.unsqueeze(-2) + eps) / (wh2.unsqueeze(-3) + eps))
+    # pos_embed = torch.cat([delta_xy, delta_wh], -1)  # [batch_size, num_boxes1, num_boxes2, 4]
     def forward(self, src_boxes: Tensor, layer_idx: Optional[int] = None):
         tgt_boxes = src_boxes
         torch._assert(src_boxes.shape[-1] == 4, f"src_boxes much have 4 coordinates")
@@ -1004,40 +1010,79 @@ class WeightedLayerBoxRelationEncoder(nn.Module):
             xy1, wh1 = src_boxes.split([2, 2], -1)
             xy2, wh2 = tgt_boxes.split([2, 2], -1)
 
-            # 1. 距离特征（使用log，并保持层次自适应）
+            # 计算层级比例 [0,1]
+            layer_ratio = curr_layer / (self.num_layers - 1)
+
+            # 距离特征
             delta_xy = torch.abs(xy1.unsqueeze(-2) - xy2.unsqueeze(-3))
-            scale = wh1.mean(dim=-1, keepdim=True).unsqueeze(-2)
-            distance_scale = 1.0 + curr_layer / self.num_layers
+            relative_dist = delta_xy / (wh1.unsqueeze(-2) + self.eps)
+            # 局部注意力
+            # 方案1：使用exp (适合强调近距离关系)
+            local_distance = torch.exp(-relative_dist) # [B, N, N, 2]
+            # 或者方案2：使用log (适合更均匀的距离关注)
+            # normalized_log = -torch.log(relative_dist + 1.0)
+            # local_distance = torch.sigmoid(normalized_log)  # 映射到(0,1)
+            # 全局注意力
+            global_distance = torch.ones_like(local_distance) * 0.5
+            # 混合局部和全局注意力
+            normalized_distance = (1 - layer_ratio) * local_distance + layer_ratio * global_distance
             # 分别计算x和y方向的注意力: exp function
-            normalized_distance = torch.exp(-delta_xy / (scale * distance_scale))  # [B, N, N, 2] -> [0,1]
+            # normalized_distance = torch.exp(-delta_xy / (wh1.unsqueeze(-2) * distance_scale))  # [B, N, N, 2] -> [0,1]
             # or 修改：使用负的log，这样距离越小，值越大
-            # normalized_distance = -torch.log(delta_xy / (scale * distance_scale) + 1.0)
+            # normalized_distance = -torch.log(delta_xy / (wh1.unsqueeze(-2) * distance_scale) + 1.0)
 
-            # 2. 尺度特征（使用log）
-            # (a) 计算宽高比例
-            wh_ratio = torch.abs(torch.log(
-                (wh1.unsqueeze(-2) + self.eps) / (wh2.unsqueeze(-3) + self.eps)))  # [B, N, N, 2]
-            # 使用exp将其映射到(0,1]范围
-            scale_scale = 1.0 + curr_layer / self.num_layers
-            normalized_wh = torch.exp(-wh_ratio / scale_scale)
-            # (b) 使用log
-            # delta_wh = torch.log((wh1.unsqueeze(-2) + self.eps) / (wh2.unsqueeze(-3) + self.eps))
 
-            # 3. 方向特征（保持三角函数编码）
+            # 尺度特征（使用log）
+            # 直接使用log比例，保留正负信息
+            wh_ratio = torch.log(
+                (wh1.unsqueeze(-2) + self.eps) / (wh2.unsqueeze(-3) + self.eps))  # [B, N, N, 2]
+            # 局部注意力：使用对称的注意力函数
+            local_wh = torch.exp(-torch.abs(wh_ratio))  # (0,1]
+            # 或者使用高斯函数
+            # local_wh = torch.exp(-wh_ratio**2)  # (0,1]
+            # 全局注意力
+            global_wh = torch.ones_like(local_wh) * 0.5
+            # 混合
+            normalized_wh = (1 - layer_ratio) * local_wh + layer_ratio * global_wh
+            # # 使用exp将其映射到(0,1]范围
+            # scale_scale = 1.0 + curr_layer / self.num_layers
+            # normalized_wh = torch.exp(-wh_ratio / scale_scale)
+            # # (b) 使用log
+            # # delta_wh = torch.log((wh1.unsqueeze(-2) + self.eps) / (wh2.unsqueeze(-3) + self.eps))
+
+
+            # 方向特征（保持三角函数编码）
             raw_delta_xy = xy1.unsqueeze(-2) - xy2.unsqueeze(-3)
             theta = torch.atan2(raw_delta_xy[..., 1], raw_delta_xy[..., 0])
-            angle_scale = 1.0 + curr_layer / self.num_layers
-            # 直接使用三角函数编码，不需要额外的权重
-            dir_embed = torch.stack([
-                torch.cos(theta / angle_scale),  # 角度差异随层数变化
-                torch.sin(theta / angle_scale)
-            ], dim=-1)
+            # 局部注意力 (使用三角函数，范围在[-1,1])
+            local_dir = torch.stack([torch.cos(theta), torch.sin(theta)], dim=-1)
+            # 全局注意力 (使用0作为中性值，因为方向特征在[-1,1]范围内)
+            global_dir = torch.zeros_like(local_dir) # 0表示方向无关
+            # 混合
+            dir_embed = (1 - layer_ratio) * local_dir + layer_ratio * global_dir
+            # angle_scale = 1.0 + curr_layer / self.num_layers
+            # # 直接使用三角函数编码，不需要额外的权重
+            # dir_embed = torch.stack([
+            #     torch.cos(theta / angle_scale),  # 角度差异随层数变化
+            #     torch.sin(theta / angle_scale)
+            # ], dim=-1)
+
+
+            # IoU特征
+            # 局部注意力
+            local_iou = box_iou(src_boxes, tgt_boxes)  # [B, N, N] -> [0,1]
+            # 全局注意力
+            global_iou = torch.ones_like(local_iou) * 0.5
+            # 混合
+            iou = (1 - layer_ratio) * local_iou + layer_ratio * global_iou
+
 
             # 组合特征
             pos_embed = torch.cat([
                 normalized_distance * distance_weight,  # [B, N, N, 2]
                 normalized_wh * scale_weight,           # [B, N, N, 2]
-                dir_embed * direction_weight,          # [B, N, N, 2]
+                dir_embed * direction_weight,           # [B, N, N, 2]
+                iou.unsqueeze(-1),                      # [B, N, N, 1]
             ], dim=-1)
 
             pos_embed = self.pos_func(pos_embed).permute(0, 3, 1, 2)
