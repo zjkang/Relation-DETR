@@ -1270,7 +1270,7 @@ class WeightedLayerBoxRelationEncoder(nn.Module):
         # 监控权重变化
         if self.training and (dist.get_rank() == 0):
             self.print_counter += 1
-            if self.print_counter % 1000 == 0:  # 每100次迭代打印一次
+            if self.print_counter % 1000 == 0:  # 每1000次迭代打印一次
                 self.print_counter = 0
                 weights = F.softmax(self.scale_weights, dim=1).detach().cpu().numpy()
                 self.logger.info("\nCurrent weights for each layer:")
@@ -1278,7 +1278,7 @@ class WeightedLayerBoxRelationEncoder(nn.Module):
                     self.logger.info(f"Layer {i}: Local={weights[i,0]:.3f}, "
                           f"Medium={weights[i,1]:.3f}, "
                           f"Global={weights[i,2]:.3f}")
-                self.logger.info("\n")
+                # self.logger.info("\n")
 
         return pos_embed.clone()
     
