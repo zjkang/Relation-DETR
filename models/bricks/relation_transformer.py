@@ -1137,7 +1137,7 @@ class WeightedLayerBoxRelationEncoder(nn.Module):
         super().__init__()
         # 原有的初始化
         self.pos_proj = Conv2dNormActivation(
-            embed_dim * 7,  # 7 = 2(距离) + 2(尺度) + 2(方向) + 1(IoU)
+            embed_dim * 5,  # 7 = 2(距离) + 2(尺度) + 2(方向) + 1(IoU)
             num_heads,
             kernel_size=1,
             inplace=inplace,
@@ -1153,7 +1153,21 @@ class WeightedLayerBoxRelationEncoder(nn.Module):
         )
         
         # 添加多尺度权重
-        self.scale_weights = nn.Parameter(torch.ones(num_layers, 3))  # 3个尺度的权重
+        initial_weights = torch.zeros(num_layers, 3)
+        for i in range(num_layers):
+            layer_ratio = i / (num_layers - 1)
+            initial_weights[i] = torch.tensor([
+                1.5 - layer_ratio * 0.7,  # 局部: 1.5->0.8
+                0.7,                      # 中等: 0.7
+                0.3 + layer_ratio * 0.7   # 全局: 0.3->1.0
+            ])
+        
+        # log空间初始化
+        self.scale_weights = nn.Parameter(torch.log(initial_weights))
+        # 可选：添加小的随机扰动以打破对称性
+        with torch.no_grad():
+            self.scale_weights.data += torch.randn_like(self.scale_weights) * 0.02
+
         self.num_layers = num_layers
         self.embed_dim = embed_dim
         self.register_buffer('layer_idx', torch.zeros(1, dtype=torch.long))
@@ -1178,31 +1192,26 @@ class WeightedLayerBoxRelationEncoder(nn.Module):
             # 1. 计算相对距离
             delta_xy = torch.abs(xy1.unsqueeze(-2) - xy2.unsqueeze(-3))
             relative_dist = delta_xy / (wh1.unsqueeze(-2) + self.eps)
-
-            # 2. 计算多尺度距离特征
             # 局部注意力 - 强调近距离关系
             local_distance = torch.exp(-relative_dist)
-            
             # 中等范围注意力 - 使用高斯核
             med_scale = 2.0 + layer_ratio * 3.0  # 随层数增加范围
             medium_distance = torch.exp(-relative_dist**2 / (2 * med_scale**2))
-            
             # 全局注意力 - 弱距离依赖
             global_distance = torch.ones_like(local_distance) * 0.5
 
             # 3. 计算尺度特征
             wh_ratio = torch.log(
                 (wh1.unsqueeze(-2) + self.eps) / (wh2.unsqueeze(-3) + self.eps))
-            
             # 多尺度尺度特征
             local_scale = torch.exp(-torch.abs(wh_ratio))
             medium_scale = torch.exp(-wh_ratio**2 / (2 * med_scale**2))
             global_scale = torch.ones_like(local_scale) * 0.5
 
-            # 4. 方向特征
-            raw_delta_xy = xy1.unsqueeze(-2) - xy2.unsqueeze(-3)
-            theta = torch.atan2(raw_delta_xy[..., 1], raw_delta_xy[..., 0])
-            dir_embed = torch.stack([torch.cos(theta), torch.sin(theta)], dim=-1)
+            # # 4. 方向特征
+            # raw_delta_xy = xy1.unsqueeze(-2) - xy2.unsqueeze(-3)
+            # theta = torch.atan2(raw_delta_xy[..., 1], raw_delta_xy[..., 0])
+            # dir_embed = torch.stack([torch.cos(theta), torch.sin(theta)], dim=-1)
             
             # 5. IoU特征
             iou = box_iou(src_boxes, tgt_boxes)
@@ -1212,7 +1221,7 @@ class WeightedLayerBoxRelationEncoder(nn.Module):
             local_features = torch.cat([
                 local_distance,          # [B, N, N, 2]
                 local_scale,            # [B, N, N, 2]
-                dir_embed,              # [B, N, N, 2]
+                # dir_embed,              # [B, N, N, 2]
                 iou.unsqueeze(-1)       # [B, N, N, 1]
             ], dim=-1)
             
@@ -1220,7 +1229,7 @@ class WeightedLayerBoxRelationEncoder(nn.Module):
             medium_features = torch.cat([
                 medium_distance,         # [B, N, N, 2]
                 medium_scale,           # [B, N, N, 2]
-                dir_embed,              # [B, N, N, 2]
+                # dir_embed,              # [B, N, N, 2]
                 iou.unsqueeze(-1)       # [B, N, N, 1]
             ], dim=-1)
             
@@ -1228,7 +1237,7 @@ class WeightedLayerBoxRelationEncoder(nn.Module):
             global_features = torch.cat([
                 global_distance,         # [B, N, N, 2]
                 global_scale,           # [B, N, N, 2]
-                torch.zeros_like(dir_embed),  # [B, N, N, 2]
+                # torch.zeros_like(dir_embed),  # [B, N, N, 2]
                 iou.unsqueeze(-1)       # [B, N, N, 1]
             ], dim=-1)
 
@@ -1261,15 +1270,31 @@ class WeightedLayerBoxRelationEncoder(nn.Module):
         # 监控权重变化
         if self.training and (dist.get_rank() == 0):
             self.print_counter += 1
-            if self.print_counter % 100 == 0:  # 每100次迭代打印一次
+            if self.print_counter % 1000 == 0:  # 每100次迭代打印一次
+                self.print_counter = 0
                 weights = F.softmax(self.scale_weights, dim=1).detach().cpu().numpy()
                 self.logger.info("\nCurrent weights for each layer:")
                 for i in range(self.num_layers):
                     self.logger.info(f"Layer {i}: Local={weights[i,0]:.3f}, "
                           f"Medium={weights[i,1]:.3f}, "
-                          f"Global={weights[i,2]:.3f}\n")
+                          f"Global={weights[i,2]:.3f}")
+                self.logger.info("\n")
 
         return pos_embed.clone()
+    
+# 预期的权重变化：
+# 浅层（例如layer 0-1）
+# Local   : ~0.6-0.7  (关注局部细节)
+# Medium  : ~0.2-0.3  (适度关注中等范围)
+# Global  : ~0.1-0.2  (较少关注全局)
+# 中层（例如layer 2-3）：
+# Local   : ~0.4-0.5  (平衡局部信息)
+# Medium  : ~0.3-0.4  (增加中等范围关注)
+# Global  : ~0.2-0.3  (开始关注全局)
+# 深层（例如layer 4-5）：
+# Local   : ~0.2-0.3  (减少局部关注)
+# Medium  : ~0.3-0.4  (保持中等范围)
+# Global  : ~0.4-0.5  (主要关注全局)
 # END: decoder-mul-relation with weighted layer-wise relation V3
 # --------------------------------------------------------------------------------------------------
 
