@@ -14,6 +14,10 @@ from models.bricks.ms_deform_attn import MultiScaleDeformableAttention
 from models.bricks.position_encoding import get_sine_pos_embed
 from util.misc import inverse_sigmoid
 
+import torch.distributed as dist
+import logging
+import os
+
 
 class RelationTransformer(TwostageTransformer):
     def __init__(
@@ -1154,6 +1158,8 @@ class WeightedLayerBoxRelationEncoder(nn.Module):
         self.embed_dim = embed_dim
         self.register_buffer('layer_idx', torch.zeros(1, dtype=torch.long))
         self.eps = 1e-5
+        self.register_buffer('print_counter', torch.zeros(1, dtype=torch.long))
+        self.logger = logging.getLogger(os.path.basename(os.getcwd()) + "." + __name__)
 
     def forward(self, src_boxes: Tensor, layer_idx: Optional[int] = None):
         tgt_boxes = src_boxes
@@ -1251,6 +1257,17 @@ class WeightedLayerBoxRelationEncoder(nn.Module):
             self.layer_idx += 1
             if self.layer_idx >= self.num_layers:
                 self.layer_idx.zero_()
+
+        # 监控权重变化
+        if self.training and (dist.get_rank() == 0):
+            self.print_counter += 1
+            if self.print_counter % 100 == 0:  # 每100次迭代打印一次
+                weights = F.softmax(self.scale_weights, dim=1).detach().cpu().numpy()
+                self.logger.info("\nCurrent weights for each layer:")
+                for i in range(self.num_layers):
+                    self.logger.info(f"Layer {i}: Local={weights[i,0]:.3f}, "
+                          f"Medium={weights[i,1]:.3f}, "
+                          f"Global={weights[i,2]:.3f}\n")
 
         return pos_embed.clone()
 # END: decoder-mul-relation with weighted layer-wise relation V3
