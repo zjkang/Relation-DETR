@@ -397,7 +397,7 @@ class RelationTransformerDecoder(nn.Module):
             if not skip_relation:
                 # src_boxes = tgt_boxes if layer_idx >= 1 else reference_points
                 tgt_boxes = output_coord
-                pos_relation = self.position_relation_embedding(tgt_boxes, layer_idx + 1).flatten(0, 1)
+                pos_relation = self.position_relation_embedding(tgt_boxes, layer_idx + 1, output_class).flatten(0, 1)
                 if attn_mask is not None:
                     pos_relation.masked_fill_(attn_mask, float("-inf"))
 
@@ -1122,7 +1122,7 @@ def box_iou(boxes1, boxes2):
 
 
 # --------------------------------------------------------------------------------------------------
-# START (V1.3): decoder-mul-relation with weighted layer-wise relation V3
+# START (V1.4): decoder-mul-relation with weighted layer-wise relation V4
 class WeightedLayerBoxRelationEncoder(nn.Module):
     def __init__(
         self,
@@ -1133,6 +1133,7 @@ class WeightedLayerBoxRelationEncoder(nn.Module):
         activation_layer=nn.ReLU,
         inplace=True,
         num_layers=6,
+        num_classes=91,
     ):
         super().__init__()
         # 原有的初始化
@@ -1157,11 +1158,10 @@ class WeightedLayerBoxRelationEncoder(nn.Module):
         for i in range(num_layers):
             layer_ratio = i / (num_layers - 1)
             initial_weights[i] = torch.tensor([
-                1.5 - layer_ratio * 0.7,  # 局部: 1.5->0.8
-                0.7,                      # 中等: 0.7
-                0.3 + layer_ratio * 0.7   # 全局: 0.3->1.0
+                3.0 - layer_ratio * 2.0,  # 局部: 3.0->1.0
+                0.8,                      # 中等: 0.8
+                0.0 + layer_ratio * 2.0   # 全局: 0.0->2.0
             ])
-        
         # log空间初始化
         self.scale_weights = nn.Parameter(torch.log(initial_weights))
         # 可选：添加小的随机扰动以打破对称性
@@ -1170,12 +1170,15 @@ class WeightedLayerBoxRelationEncoder(nn.Module):
 
         self.num_layers = num_layers
         self.embed_dim = embed_dim
-        self.register_buffer('layer_idx', torch.zeros(1, dtype=torch.long))
+        self.num_classes = num_classes
         self.eps = 1e-5
+        self.register_buffer('layer_idx', torch.zeros(1, dtype=torch.long))
         self.register_buffer('print_counter', torch.zeros(1, dtype=torch.long))
         self.logger = logging.getLogger(os.path.basename(os.getcwd()) + "." + __name__)
+        self.rank = dist.get_rank() if dist.is_initialized() else 0
 
-    def forward(self, src_boxes: Tensor, layer_idx: Optional[int] = None):
+    def forward(
+            self, src_boxes: Tensor, layer_idx: Optional[int] = None, output_class: Optional[Tensor] = None):
         tgt_boxes = src_boxes
         torch._assert(src_boxes.shape[-1] == 4, f"src_boxes much have 4 coordinates")
         torch._assert(tgt_boxes.shape[-1] == 4, f"tgt_boxes must have 4 coordinates")
@@ -1189,7 +1192,7 @@ class WeightedLayerBoxRelationEncoder(nn.Module):
             xy1, wh1 = src_boxes.split([2, 2], -1)
             xy2, wh2 = tgt_boxes.split([2, 2], -1)
 
-            # 1. 计算相对距离
+            # 计算相对距离
             delta_xy = torch.abs(xy1.unsqueeze(-2) - xy2.unsqueeze(-3))
             relative_dist = delta_xy / (wh1.unsqueeze(-2) + self.eps)
             # 局部注意力 - 强调近距离关系
@@ -1200,23 +1203,22 @@ class WeightedLayerBoxRelationEncoder(nn.Module):
             # 全局注意力 - 弱距离依赖
             global_distance = torch.ones_like(local_distance) * 0.5
 
-            # 3. 计算尺度特征
+            # 计算尺度特征
             wh_ratio = torch.log(
                 (wh1.unsqueeze(-2) + self.eps) / (wh2.unsqueeze(-3) + self.eps))
-            # 多尺度尺度特征
             local_scale = torch.exp(-torch.abs(wh_ratio))
             medium_scale = torch.exp(-wh_ratio**2 / (2 * med_scale**2))
             global_scale = torch.ones_like(local_scale) * 0.5
 
-            # # 4. 方向特征
+            # 方向特征
             # raw_delta_xy = xy1.unsqueeze(-2) - xy2.unsqueeze(-3)
             # theta = torch.atan2(raw_delta_xy[..., 1], raw_delta_xy[..., 0])
             # dir_embed = torch.stack([torch.cos(theta), torch.sin(theta)], dim=-1)
             
-            # 5. IoU特征
+            # IoU特征
             iou = box_iou(src_boxes, tgt_boxes)
 
-            # 6. 组合多尺度特征
+            # 组合多尺度特征
             # 局部特征
             local_features = torch.cat([
                 local_distance,          # [B, N, N, 2]
@@ -1241,25 +1243,31 @@ class WeightedLayerBoxRelationEncoder(nn.Module):
                 iou.unsqueeze(-1)       # [B, N, N, 1]
             ], dim=-1)
 
-            # 7. 转换为位置编码
+            # 转换为位置编码
             local_pos = self.pos_func(local_features).permute(0, 3, 1, 2)
             medium_pos = self.pos_func(medium_features).permute(0, 3, 1, 2)
             global_pos = self.pos_func(global_features).permute(0, 3, 1, 2)
 
              # 堆叠所有尺度的特征 [B, 3, embed_dim * 7, N, N]
             stacked_pos = torch.stack([local_pos, medium_pos, global_pos], dim=1)
+              
+                # # 获取前景框的概率
+                # foreground_probs = class_probs[:, :, :-1]  # [B, N, num_classes-1]
+                # # 计算前景框的置信度
+                # foreground_conf = foreground_probs.sum(dim=-1, keepdim=True)  # [B, N, 1]
+                # # 获取背景框的概率
+                # background_prob = class_probs[:, :, -1]  # [B, N]
 
         # 应用可学习权重（确保梯度传播）
-        weights = F.softmax(self.scale_weights[curr_layer], dim=0)  # [3]
-        weights = weights.view(1, 3, 1, 1, 1)  # [1, 3, 1, 1, 1]
+        weights = F.softmax(self.scale_weights[curr_layer], dim=0).view(
+            1, 3, 1, 1, 1)  #[3] -> [1, 3, 1, 1, 1]
        
-        # 使用einsum进行加权求和
-        pos_embed = torch.einsum('bscdn,s->bcdn', stacked_pos, weights.squeeze())
-        # 或使用普通的矩阵运算
+        # 使用einsum进行加权求和,投影到最终的注意力权重
+        pos_embed = self.pos_proj(
+            torch.einsum('bscdn,s->bcdn', stacked_pos, weights.squeeze())
+        )
+        # 或使用普通的矩阵运算,
         # pos_embed = (stacked_pos * weights).sum(dim=1)
-
-        # 10. 投影到最终的注意力权重
-        pos_embed = self.pos_proj(pos_embed)
 
         # 更新层索引
         if layer_idx is None:
@@ -1268,17 +1276,51 @@ class WeightedLayerBoxRelationEncoder(nn.Module):
                 self.layer_idx.zero_()
 
         # 监控权重变化
-        if self.training and (dist.get_rank() == 0):
-            self.print_counter += 1
-            if self.print_counter % 1000 == 0:  # 每1000次迭代打印一次
-                self.print_counter = 0
-                weights = F.softmax(self.scale_weights, dim=1).detach().cpu().numpy()
-                self.logger.info("\nCurrent weights for each layer:")
-                for i in range(self.num_layers):
-                    self.logger.info(f"Layer {i}: Local={weights[i,0]:.3f}, "
-                          f"Medium={weights[i,1]:.3f}, "
-                          f"Global={weights[i,2]:.3f}")
-                # self.logger.info("\n")
+        with torch.no_grad():
+            if self.training and (self.rank == 0):
+                self.print_counter += 1
+                if self.print_counter % 1000 == 0:  # 每1000次迭代打印一次
+                    self.print_counter.zero_()
+                    weights = F.softmax(self.scale_weights, dim=1).detach().cpu().numpy()
+                    self.logger.info("\nCurrent weights for each layer:")
+                    for i in range(self.num_layers):
+                        self.logger.info(f"Layer {i}: Local={weights[i,0]:.3f}, "
+                            f"Medium={weights[i,1]:.3f}, "
+                            f"Global={weights[i,2]:.3f}")
+
+                    # output class
+                    if output_class is not None:
+                        # # output_class: [B, N, num_classes]
+                        # # output_class = output_class.unsqueeze(1).unsqueeze(2).unsqueeze(3)
+                        # class_probs = output_class.softmax(dim=-1)  # [B, N, num_classes]
+                        # # 获取每个预测的最大概率对应的类别索引
+                        # max_class = class_probs.argmax(dim=-1)  # [B, N]
+                        # 计算背景框的数量  
+                        
+                        class_probs = output_class.detach().softmax(dim=-1)  # [B, N, num_classes]
+                        max_class = class_probs.argmax(dim=-1)  # [B, N]
+                        num_background = (max_class == self.num_classes - 1).sum(dim=-1)  # [B]
+                        avg_background = num_background.float().mean().item()
+                        # self.print_counter.zero_()
+                        # 记录当前层和背景数量
+                        self.logger.info(f"Layer {curr_layer}: Average number of background predictions: {avg_background:.1f}")
+                        # 可选：记录更详细的分布信息
+                        # 计算每个类别的预测数量
+                        class_counts = torch.bincount(
+                            max_class.view(-1), 
+                            minlength=self.num_classes
+                        ).float() / max_class.numel()
+                        
+                        # 计算前景vs背景的比例
+                        foreground_ratio = 1 - class_counts[-1].item()
+                        self.logger.info(f"Foreground ratio: {foreground_ratio:.3f}")
+                        
+                        # 可选：记录top-k最常预测的类别
+                        # top_k = 5
+                        # values, indices = class_counts[:-1].topk(top_k)  # 排除背景类
+                        # self.logger.info("Top {} predicted classes:".format(top_k))
+                        # for idx, val in zip(indices, values):
+                        #     self.logger.info(f"Class {idx}: {val:.3f}")
 
         return pos_embed.clone()
     
@@ -1297,6 +1339,15 @@ class WeightedLayerBoxRelationEncoder(nn.Module):
 # Global  : ~0.4-0.5  (主要关注全局)
 # END: decoder-mul-relation with weighted layer-wise relation V3
 # --------------------------------------------------------------------------------------------------
+
+
+# --------------------------------------------------------------------------------------------------
+# Weighted Layer-wise Relation V4: consider class-specific relation
+
+
+# --------------------------------------------------------------------------------------------------
+
+
 
 
 
