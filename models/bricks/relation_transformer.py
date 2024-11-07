@@ -348,7 +348,7 @@ class RelationTransformerDecoder(nn.Module):
         pos_relation = attn_mask  # fallback pos_relation to attn_mask
         # NOTE: for changes not related to previous boxes, skip_relation is True
         if not skip_relation:
-            pos_relation = self.position_relation_embedding(reference_points, 0).flatten(0, 1)
+            pos_relation = self.position_relation_embedding(reference_points, layer_idx=0).flatten(0, 1)
             if attn_mask is not None:
                 pos_relation.masked_fill_(attn_mask, float("-inf"))
 
@@ -395,9 +395,9 @@ class RelationTransformerDecoder(nn.Module):
 
             # my possible relation embedding
             if not skip_relation:
-                # src_boxes = tgt_boxes if layer_idx >= 1 else reference_points
+                src_boxes = tgt_boxes if layer_idx >= 1 else reference_points
                 tgt_boxes = output_coord
-                pos_relation = self.position_relation_embedding(tgt_boxes, layer_idx + 1, output_class).flatten(0, 1)
+                pos_relation = self.position_relation_embedding(src_boxes, tgt_boxes, layer_idx + 1, output_class).flatten(0, 1)
                 if attn_mask is not None:
                     pos_relation.masked_fill_(attn_mask, float("-inf"))
 
@@ -1178,8 +1178,9 @@ class WeightedLayerBoxRelationEncoder(nn.Module):
         self.rank = dist.get_rank() if dist.is_initialized() else 0
 
     def forward(
-            self, src_boxes: Tensor, layer_idx: Optional[int] = None, output_class: Optional[Tensor] = None):
-        tgt_boxes = src_boxes
+            self, src_boxes: Tensor, tgt_boxes: Tensor = None, layer_idx: Optional[int] = None, output_class: Optional[Tensor] = None):
+        if tgt_boxes is None:
+            tgt_boxes = src_boxes
         torch._assert(src_boxes.shape[-1] == 4, f"src_boxes much have 4 coordinates")
         torch._assert(tgt_boxes.shape[-1] == 4, f"tgt_boxes must have 4 coordinates")
 
@@ -1288,39 +1289,39 @@ class WeightedLayerBoxRelationEncoder(nn.Module):
                             f"Medium={weights[i,1]:.3f}, "
                             f"Global={weights[i,2]:.3f}")
 
-                    # output class
-                    if output_class is not None:
-                        # # output_class: [B, N, num_classes]
-                        # # output_class = output_class.unsqueeze(1).unsqueeze(2).unsqueeze(3)
-                        # class_probs = output_class.softmax(dim=-1)  # [B, N, num_classes]
-                        # # 获取每个预测的最大概率对应的类别索引
-                        # max_class = class_probs.argmax(dim=-1)  # [B, N]
-                        # 计算背景框的数量  
+                    # # output class
+                    # if output_class is not None:
+                    #     # # output_class: [B, N, num_classes]
+                    #     # # output_class = output_class.unsqueeze(1).unsqueeze(2).unsqueeze(3)
+                    #     # class_probs = output_class.softmax(dim=-1)  # [B, N, num_classes]
+                    #     # # 获取每个预测的最大概率对应的类别索引
+                    #     # max_class = class_probs.argmax(dim=-1)  # [B, N]
+                    #     # 计算背景框的数量  
                         
-                        class_probs = output_class.detach().softmax(dim=-1)  # [B, N, num_classes]
-                        max_class = class_probs.argmax(dim=-1)  # [B, N]
-                        num_background = (max_class == self.num_classes - 1).sum(dim=-1)  # [B]
-                        avg_background = num_background.float().mean().item()
-                        # self.print_counter.zero_()
-                        # 记录当前层和背景数量
-                        self.logger.info(f"Layer {curr_layer}: Average number of background predictions: {avg_background:.1f}")
-                        # 可选：记录更详细的分布信息
-                        # 计算每个类别的预测数量
-                        class_counts = torch.bincount(
-                            max_class.view(-1), 
-                            minlength=self.num_classes
-                        ).float() / max_class.numel()
+                    #     class_probs = output_class.detach().softmax(dim=-1)  # [B, N, num_classes]
+                    #     max_class = class_probs.argmax(dim=-1)  # [B, N]
+                    #     num_background = (max_class == self.num_classes - 1).sum(dim=-1)  # [B]
+                    #     avg_background = num_background.float().mean().item()
+                    #     # self.print_counter.zero_()
+                    #     # 记录当前层和背景数量
+                    #     self.logger.info(f"Layer {curr_layer}: Average number of background predictions: {avg_background:.1f}")
+                    #     # 可选：记录更详细的分布信息
+                    #     # 计算每个类别的预测数量
+                    #     class_counts = torch.bincount(
+                    #         max_class.view(-1), 
+                    #         minlength=self.num_classes
+                    #     ).float() / max_class.numel()
                         
-                        # 计算前景vs背景的比例
-                        foreground_ratio = 1 - class_counts[-1].item()
-                        self.logger.info(f"Foreground ratio: {foreground_ratio:.3f}")
+                    #     # 计算前景vs背景的比例
+                    #     foreground_ratio = 1 - class_counts[-1].item()
+                    #     self.logger.info(f"Foreground ratio: {foreground_ratio:.3f}")
                         
-                        # 可选：记录top-k最常预测的类别
-                        # top_k = 5
-                        # values, indices = class_counts[:-1].topk(top_k)  # 排除背景类
-                        # self.logger.info("Top {} predicted classes:".format(top_k))
-                        # for idx, val in zip(indices, values):
-                        #     self.logger.info(f"Class {idx}: {val:.3f}")
+                    #     # 可选：记录top-k最常预测的类别
+                    #     # top_k = 5
+                    #     # values, indices = class_counts[:-1].topk(top_k)  # 排除背景类
+                    #     # self.logger.info("Top {} predicted classes:".format(top_k))
+                    #     # for idx, val in zip(indices, values):
+                    #     #     self.logger.info(f"Class {idx}: {val:.3f}")
 
         return pos_embed.clone()
     
