@@ -6,6 +6,11 @@ from torch import Tensor, nn
 from models.bricks.denoising import GenerateCDNQueries
 from models.detectors.base_detector import DNDETRDetector
 
+import torch
+import torch.distributed as dist
+import logging
+import os
+
 
 class RelationDETR(DNDETRDetector):
     def __init__(
@@ -47,6 +52,10 @@ class RelationDETR(DNDETRDetector):
             label_noise_prob=0.5,
             box_noise_scale=1.0,
         )
+        self.register_buffer('print_counter', torch.zeros(1, dtype=torch.long))
+        self.logger = logging.getLogger(os.path.basename(os.getcwd()) + "." + __name__)
+        self.rank = dist.get_rank() if dist.is_initialized() else 0
+
 
     def forward(self, images: List[Tensor], targets: List[Dict] = None):
         # get original image sizes, used for postprocess
@@ -121,9 +130,13 @@ class RelationDETR(DNDETRDetector):
             }
 
             # compute loss
-            loss_dict = self.criterion(output, targets)
+            loss_dict, matching_stats_dict = self.criterion(output, targets)
             dn_losses = self.compute_dn_loss(dn_metas, targets)
             loss_dict.update(dn_losses)
+
+            if self.rank == 0 and self.print_counter % 1000 == 0:
+                self.print_counter.zero_()
+                self.logger.info(matching_stats_dict)
 
             # compute hybrid loss
             multi_targets = copy.deepcopy(targets)

@@ -130,6 +130,80 @@ class SetCriterion(nn.Module):
         losses.update(loss_boxes)
         return losses
 
+    def predict_matching_targets(self, outputs, targets, layer_idx=None):
+        gt_boxes, gt_labels = list(zip(*map(lambda x: (x["boxes"], x["labels"]), targets)))
+        pred_logits, pred_boxes = outputs["pred_logits"], outputs["pred_boxes"]
+        matching_stats = self.analyze_matching(pred_logits, pred_boxes, gt_boxes, gt_labels, layer_idx=layer_idx)
+        return matching_stats
+
+    def analyze_matching(self, pred_logits, pred_boxes, gt_boxes, gt_labels, iou_threshold=0.5, layer_idx=None):
+        """分析每个GT被多少个预测匹配
+        Args:
+            pred_logits: [B, N, num_classes] - 预测类别logits
+            pred_boxes: [B, N, 4] - 预测框
+            gt_boxes: [B, M, 4] - GT框
+            gt_labels: [B, M] - GT类别
+            iou_threshold: float - IoU匹配阈值
+        Returns:
+            matching_stats: dict - 匹配统计信息
+        """
+        with torch.no_grad():
+            batch_size = pred_boxes.shape[0]
+            matching_stats = []
+
+            # 获取预测类别
+            pred_labels = pred_logits.argmax(dim=-1)  # [B, N]
+
+            for b in range(batch_size):
+                # 获取当前图片的GT
+                cur_gt_boxes = gt_boxes[b]     # [M, 4]
+                cur_gt_labels = gt_labels[b]    # [M]
+                M = len(cur_gt_boxes)
+
+                # 获取当前图片的预测
+                cur_pred_boxes = pred_boxes[b]    # [N, 4]
+                cur_pred_labels = pred_labels[b]  # [N]
+
+                # 计算IoU矩阵
+                iou_matrix = box_ops.box_iou(cur_gt_boxes, cur_pred_boxes)  # [M, N]
+
+                # 统计每个GT匹配的预测数量
+                matched_preds_per_gt = []
+                for gt_idx in range(M):
+                    # 找到IoU大于阈值且类别匹配的预测
+                    matched_mask = (iou_matrix[gt_idx] > iou_threshold) & (cur_pred_labels == cur_gt_labels[gt_idx])
+                    num_matches = matched_mask.sum().item()
+
+                    matched_preds_per_gt.append({
+                        'gt_idx': gt_idx,
+                        'gt_label': cur_gt_labels[gt_idx].item(),
+                        'num_matches': num_matches,
+                        'matched_pred_indices': matched_mask.nonzero().squeeze(-1).tolist(),
+                        'matched_ious': iou_matrix[gt_idx][matched_mask].tolist()
+                    })
+
+                matching_stats.append({
+                    'image_id': b,
+                    'num_gts': M,
+                    'matches_per_gt': matched_preds_per_gt,
+                    'total_matches': sum(m['num_matches'] for m in matched_preds_per_gt)
+                })
+
+            # 计算整体统计信息
+            total_gts = sum(stat['num_gts'] for stat in matching_stats)
+            total_matches = sum(stat['total_matches'] for stat in matching_stats)
+            avg_matches_per_gt = total_matches / total_gts if total_gts > 0 else 0
+
+            summary = {
+                'layer_idx': layer_idx,
+                'total_gts': total_gts,
+                'total_matches': total_matches,
+                'avg_matches_per_gt': avg_matches_per_gt,
+                'per_image_stats': matching_stats
+            }
+            return summary
+
+
     def forward(self, outputs, targets):
         """This performs the loss computation
 
@@ -155,6 +229,12 @@ class SetCriterion(nn.Module):
         }
         losses.update(self.calculate_loss(matching_outputs, targets, num_boxes))
 
+        matching_stats_dict = {}
+        if "aux_outputs" in outputs:
+            for i, aux_outputs in enumerate(outputs["aux_outputs"]):
+                matching_stats = self.predict_matching_targets(aux_outputs, targets, layer_idx=i)
+                matching_stats_dict.update({f"matching_stats_{i}": matching_stats})
+
         # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.
         if "aux_outputs" in outputs:
             for i, aux_outputs in enumerate(outputs["aux_outputs"]):
@@ -171,7 +251,7 @@ class SetCriterion(nn.Module):
             losses_enc = self.calculate_loss(enc_outputs, bin_targets, num_boxes)
             losses.update({k + f"_enc": v for k, v in losses_enc.items()})
 
-        return losses
+        return losses, matching_stats_dict
 
 
 class HybridSetCriterion(SetCriterion):
