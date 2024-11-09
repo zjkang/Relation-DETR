@@ -292,7 +292,6 @@ class RelationTransformerDecoder(nn.Module):
         self.num_classes = num_classes
         self.num_votes = num_votes
 
-
         # decoder layers and embedding
         self.layers = nn.ModuleList([copy.deepcopy(decoder_layer) for _ in range(num_layers)])
         self.ref_point_head = MLP(2 * self.embed_dim, self.embed_dim, self.embed_dim, 2)
@@ -311,7 +310,8 @@ class RelationTransformerDecoder(nn.Module):
         #     self.embed_dim, self.num_heads, self.num_votes)
         # self.position_relation_embedding = DualLayerBoxRelationEncoder(self.embed_dim, 16, self.num_heads)
         # self.position_relation_embedding = PositionRelationEmbeddingV2(16, self.num_heads)
-        self.position_relation_embedding = WeightedLayerBoxRelationEncoder(16, self.num_heads, num_layers=self.num_layers)
+        # self.position_relation_embedding = WeightedLayerBoxRelationEncoder(16, self.num_heads, num_layers=self.num_layers)
+        self.position_relation_embedding = RankAwareRelationEncoder(self.embed_dim, self.num_heads, self.num_layers)
 
         self.init_weights()
 
@@ -346,11 +346,11 @@ class RelationTransformerDecoder(nn.Module):
         valid_ratio_scale = torch.cat([valid_ratios, valid_ratios], -1)[:, None]
 
         pos_relation = attn_mask  # fallback pos_relation to attn_mask
-        # NOTE: for changes not related to previous boxes, skip_relation is True
-        if not skip_relation:
-            pos_relation = self.position_relation_embedding(reference_points, 0).flatten(0, 1)
-            if attn_mask is not None:
-                pos_relation.masked_fill_(attn_mask, float("-inf"))
+        # # NOTE: for changes not related to previous boxes, skip_relation is True
+        # if not skip_relation:
+        #     pos_relation = self.position_relation_embedding(reference_points, 0).flatten(0, 1)
+        #     if attn_mask is not None:
+        #         pos_relation.masked_fill_(attn_mask, float("-inf"))
 
         for layer_idx, layer in enumerate(self.layers):
             reference_points_input = reference_points.detach()[:, :, None] * valid_ratio_scale
@@ -396,8 +396,28 @@ class RelationTransformerDecoder(nn.Module):
             # my possible relation embedding
             if not skip_relation:
                 # src_boxes = tgt_boxes if layer_idx >= 1 else reference_points
-                tgt_boxes = output_coord
-                pos_relation = self.position_relation_embedding(tgt_boxes, layer_idx + 1, output_class).flatten(0, 1)
+                # src_boxes, pred_logits=None, layer_idx=None
+                # 获取attention mask和排序索引
+                pos_relation, rank_indices = self.position_relation_embedding(
+                    output_coord, pred_logits=output_class, layer_idx=layer_idx)
+                                # 如果有排序索引，重排相关特征
+                if rank_indices is not None:
+                    # 重排query
+                    query = torch.gather(
+                        query, 1,
+                        rank_indices.unsqueeze(-1).repeat(1, 1, query.shape[-1])
+                    )
+                    # 重排query_pos
+                    query_pos = torch.gather(
+                        query_pos, 1,
+                        rank_indices.unsqueeze(-1).repeat(1, 1, query_pos.shape[-1])
+                    )
+                    # 重排reference_points
+                    reference_points = torch.gather(
+                        reference_points, 1,
+                        rank_indices.unsqueeze(-1).repeat(1, 1, reference_points.shape[-1])
+                    )
+                pos_relation = pos_relation.flatten(0, 1)
                 if attn_mask is not None:
                     pos_relation.masked_fill_(attn_mask, float("-inf"))
 
@@ -608,6 +628,140 @@ class PositionRelationEmbeddingV2(nn.Module):
 
         return pos_embed.clone()
 # --------------------------------------------------------------------------------------------------
+
+class RankAwareRelationEncoder(nn.Module):
+    def __init__(
+            self,
+            embed_dim,
+            num_heads,
+            num_layers,
+            temperature=10000.,
+            scale=100.,
+            activation_layer=nn.ReLU,
+            inplace=True):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.num_layers = num_layers
+
+        # 为每一层创建可学习的rank-aware relation query
+        self.rank_aware_relation = nn.ModuleList([
+            nn.Embedding(300, embed_dim)  # 300是预设的最大query数量
+            for _ in range(num_layers - 1)
+        ])
+        for m in self.rank_aware_content_query.parameters():
+                nn.init.zeros_(m)
+
+        # 转换层
+        self.pre_relation_trans = nn.ModuleList([
+            nn.Linear(embed_dim, embed_dim)
+            for _ in range(num_layers - 1)
+        ])
+
+        self.post_relation_trans = nn.ModuleList([
+            nn.Linear(2 * embed_dim, embed_dim)  # 2*embed_dim因为要concat
+            for _ in range(num_layers - 1)
+        ])
+
+        # # 映射到attention mask
+        # self.to_attention = nn.ModuleList([
+        #     nn.Linear(embed_dim, num_heads)
+        #     for _ in range(num_layers)
+        # ])
+
+        # self.pos_proj = Conv2dNormActivation(
+        #     embed_dim * 4,
+        #     num_heads,
+        #     kernel_size=1,
+        #     inplace=inplace,
+        #     norm_layer=None,
+        #     activation_layer=activation_layer,
+        # )
+        # 使用Conv2dNormActivation映射到attention mask
+        self.to_attention = nn.ModuleList([
+            Conv2dNormActivation(
+                embed_dim,  # 输入维度
+                num_heads,  # 输出维度
+                kernel_size=1,
+                inplace=inplace,
+                norm_layer=None,
+                activation_layer=activation_layer,
+            )
+            for _ in range(num_layers)
+        ])
+        self.pos_func = functools.partial(
+            get_sine_pos_embed,
+            num_pos_feats=embed_dim // 4,
+            temperature=temperature,
+            scale=scale,
+            exchange_xy=False,
+        )
+
+
+    def forward(self, src_boxes, pred_logits=None, layer_idx=None):
+        """
+        Args:
+            src_boxes: [B, N, 4] - 预测框
+            pred_logits: [B, N, num_classes] - 预测类别logits（可选）
+            layer_idx: int - 当前层索引
+        Returns:
+            attention_mask: [B, num_heads, N, N] - attention mask
+            rank_indices: [B, N] or None - 排序索引（如果有pred_logits）
+        """
+        B, N = src_boxes.shape[:2]
+        rank_indices = None
+
+        # 1. 计算基础的relation特征
+        with torch.no_grad():
+            # 计算基础的relation特征
+            #self.compute_base_relation(src_boxes)  # [B, N, N, 4]
+            base_relation = box_rel_encoding(src_boxes, src_boxes)
+
+            if pred_logits is not None:
+                # 获取预测的置信度分数
+                pred_scores = pred_logits.softmax(-1).max(-1)[0]  # [B, N]
+                # 按置信度排序
+                rank_indices = pred_scores.argsort(dim=1, descending=True)  # [B, N]
+
+                # 重排relation特征
+                base_relation = torch.gather(
+                    base_relation, 1,
+                    rank_indices.unsqueeze(-1).unsqueeze(-1).repeat(1, 1, N, base_relation.shape[-1])
+                )
+                base_relation = torch.gather(
+                    base_relation, 2,
+                    rank_indices.unsqueeze(1).unsqueeze(-1).repeat(1, N, 1, base_relation.shape[-1])
+                )
+
+        base_relation = self.pos_func(base_relation).permute(0, 3, 1, 2) # [B, N, N, D]
+
+        if pred_logits is not None:
+            # 2. 添加rank-aware relation query
+            rank_relation = self.pre_relation_trans[layer_idx](
+                self.rank_aware_relation[layer_idx].weight[:N].unsqueeze(0).expand(B, -1, -1)
+            )  # [B, N, D]
+
+            # 扩展rank_relation到N×N
+            rank_relation = rank_relation.unsqueeze(2) + rank_relation.unsqueeze(1)  # [B, N, N, D]
+
+            # 融合基础relation和rank-aware relation
+            relation = torch.cat([base_relation, rank_relation], dim=-1)  # [B, N, N, 2D]
+            relation = self.post_relation_trans[layer_idx](relation)  # [B, N, N, D]
+        else:
+            relation = base_relation
+
+        # 转换为attention mask
+        # relation: [B, N, N, embed_dim]
+        relation = relation.permute(0, 3, 1, 2)  # [B, embed_dim, N, N]
+        attention_mask = self.to_attention[layer_idx](relation)  # [B, num_heads, N, N]
+
+        return attention_mask, rank_indices
+
+    # def compute_base_relation(self, boxes):
+    #     """计算基础的relation特征"""
+    #     # ... 原有的relation计算逻辑 ...
+    #     pass
+
 
 
 # --------------------------------------------------------------------------------------------------
@@ -1152,7 +1306,7 @@ class WeightedLayerBoxRelationEncoder(nn.Module):
             scale=scale,
             exchange_xy=False,
         )
-        
+
         # 添加多尺度权重
         initial_weights = torch.zeros(num_layers, 3)
         for i in range(num_layers):
@@ -1214,7 +1368,7 @@ class WeightedLayerBoxRelationEncoder(nn.Module):
             # raw_delta_xy = xy1.unsqueeze(-2) - xy2.unsqueeze(-3)
             # theta = torch.atan2(raw_delta_xy[..., 1], raw_delta_xy[..., 0])
             # dir_embed = torch.stack([torch.cos(theta), torch.sin(theta)], dim=-1)
-            
+
             # IoU特征
             iou = box_iou(src_boxes, tgt_boxes)
 
@@ -1226,7 +1380,7 @@ class WeightedLayerBoxRelationEncoder(nn.Module):
                 # dir_embed,              # [B, N, N, 2]
                 iou.unsqueeze(-1)       # [B, N, N, 1]
             ], dim=-1)
-            
+
             # 中等范围特征
             medium_features = torch.cat([
                 medium_distance,         # [B, N, N, 2]
@@ -1234,7 +1388,7 @@ class WeightedLayerBoxRelationEncoder(nn.Module):
                 # dir_embed,              # [B, N, N, 2]
                 iou.unsqueeze(-1)       # [B, N, N, 1]
             ], dim=-1)
-            
+
             # 全局特征
             global_features = torch.cat([
                 global_distance,         # [B, N, N, 2]
@@ -1250,7 +1404,7 @@ class WeightedLayerBoxRelationEncoder(nn.Module):
 
              # 堆叠所有尺度的特征 [B, 3, embed_dim * 7, N, N]
             stacked_pos = torch.stack([local_pos, medium_pos, global_pos], dim=1)
-              
+
                 # # 获取前景框的概率
                 # foreground_probs = class_probs[:, :, :-1]  # [B, N, num_classes-1]
                 # # 计算前景框的置信度
@@ -1261,7 +1415,7 @@ class WeightedLayerBoxRelationEncoder(nn.Module):
         # 应用可学习权重（确保梯度传播）
         weights = F.softmax(self.scale_weights[curr_layer], dim=0).view(
             1, 3, 1, 1, 1)  #[3] -> [1, 3, 1, 1, 1]
-       
+
         # 使用einsum进行加权求和,投影到最终的注意力权重
         pos_embed = self.pos_proj(
             torch.einsum('bscdn,s->bcdn', stacked_pos, weights.squeeze())
@@ -1295,8 +1449,8 @@ class WeightedLayerBoxRelationEncoder(nn.Module):
                         # class_probs = output_class.softmax(dim=-1)  # [B, N, num_classes]
                         # # 获取每个预测的最大概率对应的类别索引
                         # max_class = class_probs.argmax(dim=-1)  # [B, N]
-                        # 计算背景框的数量  
-                        
+                        # 计算背景框的数量
+
                         class_probs = output_class.detach().softmax(dim=-1)  # [B, N, num_classes]
                         max_class = class_probs.argmax(dim=-1)  # [B, N]
                         num_background = (max_class == self.num_classes - 1).sum(dim=-1)  # [B]
@@ -1307,14 +1461,14 @@ class WeightedLayerBoxRelationEncoder(nn.Module):
                         # 可选：记录更详细的分布信息
                         # 计算每个类别的预测数量
                         class_counts = torch.bincount(
-                            max_class.view(-1), 
+                            max_class.view(-1),
                             minlength=self.num_classes
                         ).float() / max_class.numel()
-                        
+
                         # 计算前景vs背景的比例
                         foreground_ratio = 1 - class_counts[-1].item()
                         self.logger.info(f"Foreground ratio: {foreground_ratio:.3f}")
-                        
+
                         # 可选：记录top-k最常预测的类别
                         # top_k = 5
                         # values, indices = class_counts[:-1].topk(top_k)  # 排除背景类
@@ -1323,7 +1477,7 @@ class WeightedLayerBoxRelationEncoder(nn.Module):
                         #     self.logger.info(f"Class {idx}: {val:.3f}")
 
         return pos_embed.clone()
-    
+
 # 预期的权重变化：
 # 浅层（例如layer 0-1）
 # Local   : ~0.6-0.7  (关注局部细节)
