@@ -283,13 +283,20 @@ class RelationTransformerEncoderLayer(nn.Module):
 
 
 class RelationTransformerDecoder(nn.Module):
-    def __init__(self, decoder_layer, num_layers, num_classes, num_votes=16):
+    def __init__(
+            self,
+            decoder_layer,
+            num_layers,
+            num_classes,
+            num_queries=900,
+            num_votes=16):
         super().__init__()
         # parameters
         self.embed_dim = decoder_layer.embed_dim
         self.num_heads = decoder_layer.num_heads
         self.num_layers = num_layers
         self.num_classes = num_classes
+        self.num_queries = num_queries
         self.num_votes = num_votes
 
         # decoder layers and embedding
@@ -311,7 +318,8 @@ class RelationTransformerDecoder(nn.Module):
         # self.position_relation_embedding = DualLayerBoxRelationEncoder(self.embed_dim, 16, self.num_heads)
         # self.position_relation_embedding = PositionRelationEmbeddingV2(16, self.num_heads)
         # self.position_relation_embedding = WeightedLayerBoxRelationEncoder(16, self.num_heads, num_layers=self.num_layers)
-        self.position_relation_embedding = RankAwareRelationEncoder(self.embed_dim, self.num_heads, self.num_layers)
+        self.position_relation_embedding = RankAwareRelationEncoder(
+            16, self.num_heads, self.num_layers, self.num_queries)
 
         self.init_weights()
 
@@ -400,7 +408,7 @@ class RelationTransformerDecoder(nn.Module):
                 # 获取attention mask和排序索引
                 pos_relation, rank_indices = self.position_relation_embedding(
                     output_coord, pred_logits=output_class, layer_idx=layer_idx)
-                                # 如果有排序索引，重排相关特征
+                # 如果有排序索引，重排相关特征
                 if rank_indices is not None:
                     # 重排query
                     query = torch.gather(
@@ -635,6 +643,7 @@ class RankAwareRelationEncoder(nn.Module):
             embed_dim,
             num_heads,
             num_layers,
+            num_queries=900,
             temperature=10000.,
             scale=100.,
             activation_layer=nn.ReLU,
@@ -643,14 +652,15 @@ class RankAwareRelationEncoder(nn.Module):
         self.embed_dim = embed_dim
         self.num_heads = num_heads
         self.num_layers = num_layers
+        self.num_queries = num_queries
 
         # 为每一层创建可学习的rank-aware relation query
         self.rank_aware_relation = nn.ModuleList([
-            nn.Embedding(300, embed_dim)  # 300是预设的最大query数量
+            nn.Embedding(num_queries, embed_dim)  # 300是预设的最大query数量
             for _ in range(num_layers - 1)
         ])
-        for m in self.rank_aware_content_query.parameters():
-                nn.init.zeros_(m)
+        for m in self.rank_aware_relation.parameters():
+            nn.init.zeros_(m)
 
         # 转换层
         self.pre_relation_trans = nn.ModuleList([
@@ -663,31 +673,26 @@ class RankAwareRelationEncoder(nn.Module):
             for _ in range(num_layers - 1)
         ])
 
-        # # 映射到attention mask
+        # 使用Conv2dNormActivation映射到attention mask
         # self.to_attention = nn.ModuleList([
-        #     nn.Linear(embed_dim, num_heads)
+        #     Conv2dNormActivation(
+        #         embed_dim,  # 输入维度
+        #         num_heads,  # 输出维度
+        #         kernel_size=1,
+        #         inplace=inplace,
+        #         norm_layer=None,
+        #         activation_layer=activation_layer,
+        #     )
         #     for _ in range(num_layers)
         # ])
-
-        # self.pos_proj = Conv2dNormActivation(
-        #     embed_dim * 4,
-        #     num_heads,
-        #     kernel_size=1,
-        #     inplace=inplace,
-        #     norm_layer=None,
-        #     activation_layer=activation_layer,
-        # )
-        # 使用Conv2dNormActivation映射到attention mask
         self.to_attention = nn.ModuleList([
-            Conv2dNormActivation(
-                embed_dim,  # 输入维度
-                num_heads,  # 输出维度
-                kernel_size=1,
-                inplace=inplace,
-                norm_layer=None,
-                activation_layer=activation_layer,
+            nn.Sequential(
+                # 先将[B, embed_dim, N, N]转换为[B, N, N, embed_dim]
+                # 然后用Linear处理最后一维
+                nn.Linear(embed_dim, num_heads),
+                activation_layer(inplace=False)
             )
-            for _ in range(num_layers)
+            for _ in range(num_layers - 1)
         ])
         self.pos_func = functools.partial(
             get_sine_pos_embed,
@@ -697,70 +702,78 @@ class RankAwareRelationEncoder(nn.Module):
             exchange_xy=False,
         )
 
-
     def forward(self, src_boxes, pred_logits=None, layer_idx=None):
-        """
-        Args:
-            src_boxes: [B, N, 4] - 预测框
-            pred_logits: [B, N, num_classes] - 预测类别logits（可选）
-            layer_idx: int - 当前层索引
-        Returns:
-            attention_mask: [B, num_heads, N, N] - attention mask
-            rank_indices: [B, N] or None - 排序索引（如果有pred_logits）
-        """
         B, N = src_boxes.shape[:2]
         rank_indices = None
 
-        # 1. 计算基础的relation特征
         with torch.no_grad():
-            # 计算基础的relation特征
-            #self.compute_base_relation(src_boxes)  # [B, N, N, 4]
             base_relation = box_rel_encoding(src_boxes, src_boxes)
 
-            if pred_logits is not None:
-                # 获取预测的置信度分数
-                pred_scores = pred_logits.softmax(-1).max(-1)[0]  # [B, N]
-                # 按置信度排序
-                rank_indices = pred_scores.argsort(dim=1, descending=True)  # [B, N]
+            if pred_logits is not None and self.num_queries is not None:
+                num_normal_queries = self.num_queries
+                num_denoising = N - num_normal_queries
+                
+                # 只对normal queries部分计算置信度和排序
+                normal_scores = pred_logits[:, num_denoising:].softmax(-1).max(-1)[0]
+                normal_rank_indices = normal_scores.argsort(dim=1, descending=True)
+                
+                # 构建完整的排序索引
+                rank_indices = torch.arange(N, device=src_boxes.device)
+                rank_indices = rank_indices.unsqueeze(0).expand(B, -1).clone()
 
-                # 重排relation特征
-                base_relation = torch.gather(
-                    base_relation, 1,
-                    rank_indices.unsqueeze(-1).unsqueeze(-1).repeat(1, 1, N, base_relation.shape[-1])
+                # 安全地更新normal queries部分
+                normal_indices = normal_rank_indices + num_denoising
+                rank_indices[:, num_denoising:] = normal_indices
+                
+                # 分块处理relation matrix
+                normal_relation = base_relation[:, num_denoising:, num_denoising:]
+                
+                # 只重排normal queries部分
+                normal_relation = torch.gather(
+                    normal_relation, 1,
+                    normal_rank_indices.unsqueeze(-1).unsqueeze(-1).repeat(
+                        1, 1, N-num_denoising, base_relation.shape[-1])
                 )
-                base_relation = torch.gather(
-                    base_relation, 2,
-                    rank_indices.unsqueeze(1).unsqueeze(-1).repeat(1, N, 1, base_relation.shape[-1])
+                normal_relation = torch.gather(
+                    normal_relation, 2,
+                    normal_rank_indices.unsqueeze(1).unsqueeze(-1).repeat(
+                        1, N-num_denoising, 1, base_relation.shape[-1])
                 )
+                
+                # 更新base_relation中的对应部分
+                base_relation[:, num_denoising:, num_denoising:] = normal_relation
 
-        base_relation = self.pos_func(base_relation).permute(0, 3, 1, 2) # [B, N, N, D]
+        base_relation = self.pos_func(base_relation) # [B, N, N, D]
 
         if pred_logits is not None:
-            # 2. 添加rank-aware relation query
-            rank_relation = self.pre_relation_trans[layer_idx](
-                self.rank_aware_relation[layer_idx].weight[:N].unsqueeze(0).expand(B, -1, -1)
-            )  # [B, N, D]
+            # 只为normal queries生成rank-aware relation
+            normal_rank_relation = self.pre_relation_trans[layer_idx](
+                self.rank_aware_relation[layer_idx].weight[:num_normal_queries].unsqueeze(0).expand(B, -1, -1)
+            )  # [B, num_normal_queries, D]
+
+            # 创建完整的rank_relation矩阵
+            rank_relation = torch.zeros(
+                B, N, self.embed_dim,
+                device=src_boxes.device,
+                dtype=src_boxes.dtype
+            )
+            
+            # 只在normal queries部分填充rank-aware relation
+            rank_relation[:, num_denoising:] = normal_rank_relation
 
             # 扩展rank_relation到N×N
             rank_relation = rank_relation.unsqueeze(2) + rank_relation.unsqueeze(1)  # [B, N, N, D]
 
-            # 融合基础relation和rank-aware relation
+            # 融合base_relation和rank_relation
             relation = torch.cat([base_relation, rank_relation], dim=-1)  # [B, N, N, 2D]
             relation = self.post_relation_trans[layer_idx](relation)  # [B, N, N, D]
         else:
             relation = base_relation
 
-        # 转换为attention mask
-        # relation: [B, N, N, embed_dim]
-        relation = relation.permute(0, 3, 1, 2)  # [B, embed_dim, N, N]
-        attention_mask = self.to_attention[layer_idx](relation)  # [B, num_heads, N, N]
+        # relation = relation.permute(0, 3, 1, 2)
+        attention_mask = self.to_attention[layer_idx](relation).permute(0, 3, 1, 2) # [B, num_heads, N, N]
 
-        return attention_mask, rank_indices
-
-    # def compute_base_relation(self, boxes):
-    #     """计算基础的relation特征"""
-    #     # ... 原有的relation计算逻辑 ...
-    #     pass
+        return attention_mask.clone(), rank_indices
 
 
 

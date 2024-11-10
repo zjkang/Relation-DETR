@@ -68,6 +68,7 @@ transformer = RelationTransformer(
         ),
         num_layers=transformer_dec_layers,
         num_classes=num_classes,
+        num_queries=num_queries,
     ),
     num_classes=num_classes,
     num_feature_levels=num_feature_levels,
