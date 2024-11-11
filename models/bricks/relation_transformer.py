@@ -312,14 +312,14 @@ class RelationTransformerDecoder(nn.Module):
         self.norm = nn.LayerNorm(self.embed_dim)
 
         # relation embedding
-        # self.position_relation_embedding = PositionRelationEmbedding(16, self.num_heads)
+        self.position_relation_embedding = PositionRelationEmbedding(16, self.num_heads)
         # self.position_relation_embedding = MultiHeadCrossLayerHoughNetSpatialRelation(
         #     self.embed_dim, self.num_heads, self.num_votes)
         # self.position_relation_embedding = DualLayerBoxRelationEncoder(self.embed_dim, 16, self.num_heads)
         # self.position_relation_embedding = PositionRelationEmbeddingV2(16, self.num_heads)
         # self.position_relation_embedding = WeightedLayerBoxRelationEncoder(16, self.num_heads, num_layers=self.num_layers)
-        self.position_relation_embedding = RankAwareRelationEncoder(
-            16, self.num_heads, self.num_layers, self.num_queries)
+        # self.position_relation_embedding = RankAwareRelationEncoder(
+        #     16, self.num_heads, self.num_layers, self.num_queries)
 
         self.init_weights()
 
@@ -359,6 +359,8 @@ class RelationTransformerDecoder(nn.Module):
         #     pos_relation = self.position_relation_embedding(reference_points, 0).flatten(0, 1)
         #     if attn_mask is not None:
         #         pos_relation.masked_fill_(attn_mask, float("-inf"))
+
+        query_predictions = {}
 
         for layer_idx, layer in enumerate(self.layers):
             reference_points_input = reference_points.detach()[:, :, None] * valid_ratio_scale
@@ -403,31 +405,39 @@ class RelationTransformerDecoder(nn.Module):
 
             # my possible relation embedding
             if not skip_relation:
-                # src_boxes = tgt_boxes if layer_idx >= 1 else reference_points
-                # src_boxes, pred_logits=None, layer_idx=None
-                # 获取attention mask和排序索引
-                pos_relation, rank_indices = self.position_relation_embedding(
-                    output_coord, pred_logits=output_class, layer_idx=layer_idx)
-                # 如果有排序索引，重排相关特征
-                if rank_indices is not None:
-                    # 重排query
-                    query = torch.gather(
-                        query, 1,
-                        rank_indices.unsqueeze(-1).repeat(1, 1, query.shape[-1])
-                    )
-                    # 重排query_pos
-                    query_pos = torch.gather(
-                        query_pos, 1,
-                        rank_indices.unsqueeze(-1).repeat(1, 1, query_pos.shape[-1])
-                    )
-                    # 重排reference_points
-                    reference_points = torch.gather(
-                        reference_points, 1,
-                        rank_indices.unsqueeze(-1).repeat(1, 1, reference_points.shape[-1])
-                    )
-                pos_relation = pos_relation.flatten(0, 1)
+                src_boxes = tgt_boxes if layer_idx >= 1 else reference_points
+                tgt_boxes = output_coord
+                pos_relation = self.position_relation_embedding(src_boxes, tgt_boxes).flatten(0, 1)
                 if attn_mask is not None:
                     pos_relation.masked_fill_(attn_mask, float("-inf"))
+
+
+            # if not skip_relation:
+            #     # src_boxes = tgt_boxes if layer_idx >= 1 else reference_points
+            #     # src_boxes, pred_logits=None, layer_idx=None
+            #     # 获取attention mask和排序索引
+            #     pos_relation, rank_indices = self.position_relation_embedding(
+            #         output_coord, pred_logits=output_class, layer_idx=layer_idx)
+            #     # 如果有排序索引，重排相关特征
+            #     if rank_indices is not None:
+            #         # 重排query
+            #         query = torch.gather(
+            #             query, 1,
+            #             rank_indices.unsqueeze(-1).repeat(1, 1, query.shape[-1])
+            #         )
+            #         # 重排query_pos
+            #         query_pos = torch.gather(
+            #             query_pos, 1,
+            #             rank_indices.unsqueeze(-1).repeat(1, 1, query_pos.shape[-1])
+            #         )
+            #         # 重排reference_points
+            #         reference_points = torch.gather(
+            #             reference_points, 1,
+            #             rank_indices.unsqueeze(-1).repeat(1, 1, reference_points.shape[-1])
+            #         )
+            #     pos_relation = pos_relation.flatten(0, 1)
+            #     if attn_mask is not None:
+            #         pos_relation.masked_fill_(attn_mask, float("-inf"))
 
 
             # iterative bounding box refinement
@@ -437,6 +447,8 @@ class RelationTransformerDecoder(nn.Module):
 
         outputs_classes = torch.stack(outputs_classes)
         outputs_coords = torch.stack(outputs_coords)
+
+
         return outputs_classes, outputs_coords
 
 
@@ -637,6 +649,7 @@ class PositionRelationEmbeddingV2(nn.Module):
         return pos_embed.clone()
 # --------------------------------------------------------------------------------------------------
 
+
 class RankAwareRelationEncoder(nn.Module):
     def __init__(
             self,
@@ -712,11 +725,11 @@ class RankAwareRelationEncoder(nn.Module):
             if pred_logits is not None and self.num_queries is not None:
                 num_normal_queries = self.num_queries
                 num_denoising = N - num_normal_queries
-                
+
                 # 只对normal queries部分计算置信度和排序
-                normal_scores = pred_logits[:, num_denoising:].softmax(-1).max(-1)[0]
+                normal_scores = pred_logits[:, num_denoising:].sigmoid().max(-1)[0]
                 normal_rank_indices = normal_scores.argsort(dim=1, descending=True)
-                
+
                 # 构建完整的排序索引
                 rank_indices = torch.arange(N, device=src_boxes.device)
                 rank_indices = rank_indices.unsqueeze(0).expand(B, -1).clone()
@@ -724,10 +737,10 @@ class RankAwareRelationEncoder(nn.Module):
                 # 安全地更新normal queries部分
                 normal_indices = normal_rank_indices + num_denoising
                 rank_indices[:, num_denoising:] = normal_indices
-                
+
                 # 分块处理relation matrix
                 normal_relation = base_relation[:, num_denoising:, num_denoising:]
-                
+
                 # 只重排normal queries部分
                 normal_relation = torch.gather(
                     normal_relation, 1,
@@ -739,7 +752,7 @@ class RankAwareRelationEncoder(nn.Module):
                     normal_rank_indices.unsqueeze(1).unsqueeze(-1).repeat(
                         1, N-num_denoising, 1, base_relation.shape[-1])
                 )
-                
+
                 # 更新base_relation中的对应部分
                 base_relation[:, num_denoising:, num_denoising:] = normal_relation
 
@@ -757,7 +770,7 @@ class RankAwareRelationEncoder(nn.Module):
                 device=src_boxes.device,
                 dtype=src_boxes.dtype
             )
-            
+
             # 只在normal queries部分填充rank-aware relation
             rank_relation[:, num_denoising:] = normal_rank_relation
 
@@ -772,6 +785,7 @@ class RankAwareRelationEncoder(nn.Module):
 
         # relation = relation.permute(0, 3, 1, 2)
         attention_mask = self.to_attention[layer_idx](relation).permute(0, 3, 1, 2) # [B, num_heads, N, N]
+
 
         return attention_mask.clone(), rank_indices
 

@@ -133,10 +133,57 @@ class SetCriterion(nn.Module):
     def predict_matching_targets(self, outputs, targets, layer_idx=None):
         gt_boxes, gt_labels = list(zip(*map(lambda x: (x["boxes"], x["labels"]), targets)))
         pred_logits, pred_boxes = outputs["pred_logits"], outputs["pred_boxes"]
-        matching_stats = self.analyze_matching(pred_logits, pred_boxes, gt_boxes, gt_labels, layer_idx=layer_idx)
+
+        matching_stats = {}
+        matching_stats.update(
+            "matching_stats", self.analyze_matching(
+                pred_logits, pred_boxes, gt_boxes, gt_labels))
+        matching_stats.update(
+            "query_predictions", self.analyze_query_predictions(
+                pred_logits, top_k=5, num_display=10))
         return matching_stats
 
-    def analyze_matching(self, pred_logits, pred_boxes, gt_boxes, gt_labels, iou_threshold=0.5, layer_idx=None):
+    def analyze_query_predictions(pred_logits, top_k=5, num_display=10):
+        """分析query的预测情况
+        Args:
+            pred_logits: [B, N, num_classes]
+            top_k: 每个query要显示的top k类别数
+            num_display: 要显示的query数量
+        """
+        scores, classes = pred_logits.sigmoid().topk(top_k, dim=-1)  # [B, N, top_k]
+
+        # 只选择置信度最高的num_display个query进行显示
+        max_scores = scores[..., 0]  # [B, N]
+        top_query_indices = max_scores.topk(num_display, dim=1)[1]  # [B, num_display]
+
+        # 收集这些query的预测信息
+        selected_scores = torch.gather(scores, 1,
+            top_query_indices.unsqueeze(-1).expand(-1, -1, top_k))  # [B, num_display, top_k]
+        selected_classes = torch.gather(classes, 1,
+            top_query_indices.unsqueeze(-1).expand(-1, -1, top_k))  # [B, num_display, top_k]
+        # 统计信息
+        stats = {
+            'mean_confidence': max_scores.mean().item(),
+            'max_confidence': max_scores.max().item(),
+            'min_confidence': max_scores.min().item(),
+            'num_high_conf': (max_scores > 0.5).sum().item()  # 高置信度query的数量
+        }
+        return {
+            'selected_queries': {
+                'indices': top_query_indices,    # 选中的query索引
+                'scores': selected_scores,       # 这些query的分数
+                'classes': selected_classes      # 对应的类别
+            },
+            'stats': stats                      # 统计信息
+        }
+
+    def analyze_matching(
+            self,
+            pred_logits,
+            pred_boxes,
+            gt_boxes,
+            gt_labels,
+            iou_threshold=0.5):
         """分析每个GT被多少个预测匹配
         Args:
             pred_logits: [B, N, num_classes] - 预测类别logits
@@ -195,7 +242,6 @@ class SetCriterion(nn.Module):
             avg_matches_per_gt = total_matches / total_gts if total_gts > 0 else 0
 
             summary = {
-                'layer_idx': layer_idx,
                 'total_gts': total_gts,
                 'total_matches': total_matches,
                 'avg_matches_per_gt': avg_matches_per_gt,
@@ -229,12 +275,6 @@ class SetCriterion(nn.Module):
         }
         losses.update(self.calculate_loss(matching_outputs, targets, num_boxes))
 
-        matching_stats_dict = {}
-        if "aux_outputs" in outputs:
-            for i, aux_outputs in enumerate(outputs["aux_outputs"]):
-                matching_stats = self.predict_matching_targets(aux_outputs, targets, layer_idx=i)
-                matching_stats_dict.update({f"matching_stats_{i}": matching_stats})
-
         # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.
         if "aux_outputs" in outputs:
             for i, aux_outputs in enumerate(outputs["aux_outputs"]):
@@ -250,6 +290,15 @@ class SetCriterion(nn.Module):
                     bt["labels"] = torch.zeros_like(bt["labels"])
             losses_enc = self.calculate_loss(enc_outputs, bin_targets, num_boxes)
             losses.update({k + f"_enc": v for k, v in losses_enc.items()})
+
+        matching_stats_dict = {}
+        if "aux_outputs" in outputs:
+            for i, aux_outputs in enumerate(outputs["aux_outputs"]):
+                matching_stats = self.predict_matching_targets(aux_outputs, targets, layer_idx=i)
+                matching_stats_dict.update({f"matching_stats_{i}": matching_stats})
+        final_layer_idx = len(outputs["aux_outputs"])
+        matching_stats = self.predict_matching_targets(matching_outputs, targets, final_layer_idx)
+        matching_stats_dict.update({f"matching_stats_{final_layer_idx}": matching_stats})
 
         return losses, matching_stats_dict
 
