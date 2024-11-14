@@ -10,6 +10,7 @@ import torch
 import torch.distributed as dist
 import logging
 import os
+import json
 
 
 class RelationDETR(DNDETRDetector):
@@ -136,14 +137,15 @@ class RelationDETR(DNDETRDetector):
 
             if self.rank == 0 and self.print_counter % 1000 == 0:
                 self.print_counter.zero_()
-                self.logger.info(matching_stats_dict)
+                self.logger.info(json.dumps(matching_stats_dict, indent=2))
+            self.print_counter += 1
 
             # compute hybrid loss
             multi_targets = copy.deepcopy(targets)
             for t in multi_targets:
                 t["boxes"] = t["boxes"].repeat(self.hybrid_assign, 1)
                 t["labels"] = t["labels"].repeat(self.hybrid_assign)
-            hybrid_losses = self.criterion(hybrid_metas, multi_targets)
+            hybrid_losses, _ = self.criterion(hybrid_metas, multi_targets)
             loss_dict.update({k + "_hybrid": v for k, v in hybrid_losses.items()})
 
             # loss reweighting

@@ -130,20 +130,116 @@ class SetCriterion(nn.Module):
         losses.update(loss_boxes)
         return losses
 
-    def predict_matching_targets(self, outputs, targets, layer_idx=None):
+    def predict_matching_targets(self, outputs, targets):
         gt_boxes, gt_labels = list(zip(*map(lambda x: (x["boxes"], x["labels"]), targets)))
         pred_logits, pred_boxes = outputs["pred_logits"], outputs["pred_boxes"]
 
         matching_stats = {}
-        matching_stats.update(
-            "matching_stats", self.analyze_matching(
-                pred_logits, pred_boxes, gt_boxes, gt_labels))
-        matching_stats.update(
-            "query_predictions", self.analyze_query_predictions(
-                pred_logits, top_k=5, num_display=10))
+        matching_stats.update(self.analyze_matching_results(
+            pred_logits, pred_boxes, gt_boxes, gt_labels))
+        matching_stats.update(self.analyze_target_matching(
+            pred_logits, pred_boxes, gt_boxes, gt_labels))
+        matching_stats.update(self.analyze_query_predictions(
+            pred_logits, top_k=5, num_display=10))
         return matching_stats
 
-    def analyze_query_predictions(pred_logits, top_k=5, num_display=10):
+    def analyze_matching_results(self, pred_logits, pred_boxes, gt_boxes, gt_labels):
+        """分析匹配结果
+        Args:
+            pred_logits: [B, N, num_classes] - 预测类别logits
+            pred_boxes: [B, N, 4] - 预测框
+            gt_boxes: list of [M, 4] - GT框
+            gt_labels: list of [M] - GT类别
+        """
+        # 获取匹配结果
+        indices = list(map(self.matcher, pred_boxes, pred_logits, gt_boxes, gt_labels))
+        
+        # 计算IoU矩阵
+        batch_ious = []
+        for b in range(len(gt_boxes)):
+            iou_matrix = box_ops.box_iou(
+                box_ops._box_cxcywh_to_xyxy(pred_boxes[b]),
+                box_ops._box_cxcywh_to_xyxy(gt_boxes[b])
+            )
+            batch_ious.append(iou_matrix)
+
+        # 构建分析结果
+        matching_results = {
+            "matcher_results": [],
+            "matcher_statistics": {
+                "total_matches": 0,
+                "total_gts": 0,
+                "avg_match_score": 0.0,
+                "avg_match_iou": 0.0
+            }
+        }
+
+        total_matches = 0
+        total_score = 0.0
+        total_iou = 0.0
+        total_gts = 0
+
+        # 分析每个batch的匹配结果
+        for batch_idx, ((src_idx, tgt_idx), iou_matrix) in enumerate(zip(indices, batch_ious)):
+            batch_result = {
+                "batch_id": batch_idx,
+                "num_gts": len(gt_labels[batch_idx]),
+                "num_matches": len(src_idx),
+                "matches": []
+            }
+            
+            total_gts += len(gt_labels[batch_idx])
+            total_matches += len(src_idx)
+
+            # 分析每个匹配
+            for i in range(len(src_idx)):
+                pred_idx = src_idx[i].item()
+                gt_idx = tgt_idx[i].item()
+                
+                # 获取GT类别和对应的预测分数
+                gt_label = gt_labels[batch_idx][gt_idx].item()
+                pred_score = pred_logits[batch_idx, pred_idx, gt_label].sigmoid().item()
+                
+                # 获取IoU
+                iou = iou_matrix[pred_idx, gt_idx].item()
+                
+                # 获取预测框的top-k预测
+                k = 3  # 显示前k个预测
+                pred_scores = pred_logits[batch_idx, pred_idx].sigmoid()
+                top_scores, top_classes = pred_scores.topk(k)
+                
+                match_info = {
+                    "pred_idx": pred_idx,
+                    "gt_idx": gt_idx,
+                    "gt_label": gt_label,
+                    "gt_class_score": pred_score,
+                    "iou": iou,
+                    "top_predictions": [
+                        {
+                            "class_id": top_classes[j].item(),
+                            "score": top_scores[j].item()
+                        }
+                        for j in range(k)
+                    ]
+                }
+                
+                batch_result["matches"].append(match_info)
+                total_score += pred_score
+                total_iou += iou
+
+            matching_results["matcher_results"].append(batch_result)
+
+        # 计算统计信息
+        matching_results["matcher_statistics"].update({
+            "total_matches": total_matches,
+            "total_gts": total_gts,
+            "avg_match_score": total_score / total_matches if total_matches > 0 else 0.0,
+            "avg_match_iou": total_iou / total_matches if total_matches > 0 else 0.0
+        })
+
+        return matching_results
+
+    def analyze_query_predictions(self, pred_logits, top_k=5, num_display=10):
         """分析query的预测情况
         Args:
             pred_logits: [B, N, num_classes]
@@ -151,33 +247,44 @@ class SetCriterion(nn.Module):
             num_display: 要显示的query数量
         """
         scores, classes = pred_logits.sigmoid().topk(top_k, dim=-1)  # [B, N, top_k]
-
         # 只选择置信度最高的num_display个query进行显示
         max_scores = scores[..., 0]  # [B, N]
         top_query_indices = max_scores.topk(num_display, dim=1)[1]  # [B, num_display]
-
         # 收集这些query的预测信息
         selected_scores = torch.gather(scores, 1,
             top_query_indices.unsqueeze(-1).expand(-1, -1, top_k))  # [B, num_display, top_k]
         selected_classes = torch.gather(classes, 1,
             top_query_indices.unsqueeze(-1).expand(-1, -1, top_k))  # [B, num_display, top_k]
-        # 统计信息
-        stats = {
-            'mean_confidence': max_scores.mean().item(),
-            'max_confidence': max_scores.max().item(),
-            'min_confidence': max_scores.min().item(),
-            'num_high_conf': (max_scores > 0.5).sum().item()  # 高置信度query的数量
-        }
-        return {
-            'selected_queries': {
-                'indices': top_query_indices,    # 选中的query索引
-                'scores': selected_scores,       # 这些query的分数
-                'classes': selected_classes      # 对应的类别
+        # 构建JSON格式的结果
+        analysis_results = {
+            "query_predictions": {
+                f"batch_{batch_idx}": {
+                    f"query_{top_query_indices[batch_idx][query_idx].item()}": {
+                        "predictions": [
+                            {
+                                "class_id": selected_classes[batch_idx, query_idx, k].item(),
+                                "score": selected_scores[batch_idx, query_idx, k].item()
+                            }
+                            for k in range(top_k)
+                        ]
+                    }
+                    for query_idx in range(num_display)
+                }
+                for batch_idx in range(len(top_query_indices))
             },
-            'stats': stats                      # 统计信息
+            "query_statistics": {
+                "mean_confidence": max_scores.mean().item(),
+                "max_confidence": max_scores.max().item(),
+                "min_confidence": max_scores.min().item(),
+                "num_high_conf": (max_scores > 0.5).sum().item()
+            }
         }
+        # 使用logger输出JSON格式的结果
+        # logger.info(json.dumps(analysis_results, indent=2))
+        return analysis_results
 
-    def analyze_matching(
+
+    def analyze_target_matching(
             self,
             pred_logits,
             pred_boxes,
@@ -199,7 +306,8 @@ class SetCriterion(nn.Module):
             matching_stats = []
 
             # 获取预测类别
-            pred_labels = pred_logits.argmax(dim=-1)  # [B, N]
+            pred_scores = pred_logits.sigmoid()  # [B, N, num_classes]
+            scores, pred_labels = pred_scores.max(dim=-1)  # [B, N], [B, N]
 
             for b in range(batch_size):
                 # 获取当前图片的GT
@@ -210,6 +318,7 @@ class SetCriterion(nn.Module):
                 # 获取当前图片的预测
                 cur_pred_boxes = pred_boxes[b]    # [N, 4]
                 cur_pred_labels = pred_labels[b]  # [N]
+                cur_pred_scores = scores[b]  # [N]
 
                 # 计算IoU矩阵
                 iou_matrix = box_ops.box_iou(cur_gt_boxes, cur_pred_boxes)  # [M, N]
@@ -226,7 +335,8 @@ class SetCriterion(nn.Module):
                         'gt_label': cur_gt_labels[gt_idx].item(),
                         'num_matches': num_matches,
                         'matched_pred_indices': matched_mask.nonzero().squeeze(-1).tolist(),
-                        'matched_ious': iou_matrix[gt_idx][matched_mask].tolist()
+                        'matched_ious': iou_matrix[gt_idx][matched_mask].tolist(),
+                        'matched_scores': cur_pred_scores[matched_mask].tolist(),
                     })
 
                 matching_stats.append({
@@ -242,10 +352,10 @@ class SetCriterion(nn.Module):
             avg_matches_per_gt = total_matches / total_gts if total_gts > 0 else 0
 
             summary = {
-                'total_gts': total_gts,
-                'total_matches': total_matches,
-                'avg_matches_per_gt': avg_matches_per_gt,
-                'per_image_stats': matching_stats
+                'target_total_gts': total_gts,
+                'target_total_matches': total_matches,
+                'target_avg_matches_per_gt': avg_matches_per_gt,
+                'target_per_image_stats': matching_stats
             }
             return summary
 
@@ -294,10 +404,10 @@ class SetCriterion(nn.Module):
         matching_stats_dict = {}
         if "aux_outputs" in outputs:
             for i, aux_outputs in enumerate(outputs["aux_outputs"]):
-                matching_stats = self.predict_matching_targets(aux_outputs, targets, layer_idx=i)
+                matching_stats = self.predict_matching_targets(aux_outputs, targets)
                 matching_stats_dict.update({f"matching_stats_{i}": matching_stats})
         final_layer_idx = len(outputs["aux_outputs"])
-        matching_stats = self.predict_matching_targets(matching_outputs, targets, final_layer_idx)
+        matching_stats = self.predict_matching_targets(matching_outputs, targets)
         matching_stats_dict.update({f"matching_stats_{final_layer_idx}": matching_stats})
 
         return losses, matching_stats_dict
