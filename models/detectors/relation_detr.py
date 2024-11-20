@@ -3,7 +3,8 @@ from typing import Dict, List
 
 from torch import Tensor, nn
 
-from models.bricks.denoising import GenerateCDNQueries
+# from models.bricks.denoising import GenerateCDNQueries
+from models.bricks.denoising import StructuredCDNQueries
 from models.detectors.base_detector import DNDETRDetector
 
 import torch
@@ -45,7 +46,15 @@ class RelationDETR(DNDETRDetector):
         self.transformer = transformer
         self.criterion = criterion
         self.postprocessor = postprocessor
-        self.denoising_generator = GenerateCDNQueries(
+        # self.denoising_generator = GenerateCDNQueries(
+        #     num_queries=num_queries,
+        #     num_classes=num_classes,
+        #     label_embed_dim=embed_dim,
+        #     denoising_nums=denoising_nums,
+        #     label_noise_prob=0.5,
+        #     box_noise_scale=1.0,
+        # )
+        self.denoising_generator = StructuredCDNQueries(
             num_queries=num_queries,
             num_classes=num_classes,
             label_embed_dim=embed_dim,
