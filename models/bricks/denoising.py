@@ -1,7 +1,6 @@
 import torch
 from torch import nn
 from torchvision.ops import boxes as box_ops
-
 from util.misc import inverse_sigmoid
 
 
@@ -424,8 +423,7 @@ class GenerateCDNQueries(GenerateDNQueries):
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from mmdet.models.utils import box_ops
-from mmdet.models.utils.misc import inverse_sigmoid
+
 
 class StructuredCDNQueries(nn.Module):
     def __init__(
@@ -436,7 +434,7 @@ class StructuredCDNQueries(nn.Module):
         label_noise_prob=0.5,
         box_noise_scale=0.4,
         label_embed_dim=256,
-        alpha=0.7
+        alpha=0.5
     ):
         super().__init__()
         self.num_classes = num_classes
@@ -491,7 +489,6 @@ class StructuredCDNQueries(nn.Module):
         # 7. 转换坐标系并应用噪声
         xyxy_boxes = box_ops._box_cxcywh_to_xyxy(boxes)
         noised_xyxy = xyxy_boxes + final_noise
-
         # 8. 转回cxcywh格式
         noised_boxes = box_ops._box_xyxy_to_cxcywh(noised_xyxy)
         noised_boxes = noised_boxes.clamp(min=0, max=1)
@@ -547,9 +544,38 @@ class StructuredCDNQueries(nn.Module):
         return labels
 
     def generate_attention_mask(self, max_gt_num_per_image, device):
-        mask = torch.zeros(max_gt_num_per_image, max_gt_num_per_image, device=device)
-        mask = torch.where(mask == 1, float('-inf'), mask)
-        return mask
+        """生成注意力掩码
+        Args:
+            max_gt_num_per_image: 每张图像最大的GT数量
+            device: 设备
+        Returns:
+            attn_mask: 注意力掩码 [tgt_size, tgt_size]
+        """
+        # 计算query数量
+        noised_query_nums = max_gt_num_per_image * self.denoising_groups  # 去噪query数量
+        tgt_size = noised_query_nums + self.num_queries  # 总query数量 = 去噪 + 匹配
+        
+        # 初始化attention mask为False（表示可以相互attend）
+        attn_mask = torch.zeros(tgt_size, tgt_size, device=device, dtype=torch.bool)
+        
+        # 匹配query不能看到去噪query
+        attn_mask[noised_query_nums:, :noised_query_nums] = True
+        
+        # 每组去噪query之间的限制
+        for i in range(self.denoising_groups):  # *每组有正负样本应该是可以看到彼此的
+            start_col = start_row = max_gt_num_per_image * i
+            end_col = end_row = max_gt_num_per_image * (i + 1)
+            assert noised_query_nums >= end_col and start_col >= 0, "check attn_mask"
+            # 当前组的query不能看到其他组的query
+            attn_mask[start_row:end_row, :start_col] = True
+            attn_mask[start_row:end_row, end_col:noised_query_nums] = True
+
+        return attn_mask
+
+    # def generate_attention_mask(self, max_gt_num_per_image, device):
+    #     mask = torch.zeros(max_gt_num_per_image, max_gt_num_per_image, device=device)
+    #     mask = torch.where(mask == 1, float('-inf'), mask)
+    #     return mask
 
     def forward(self, gt_labels_list, gt_boxes_list):
         # 1. 获取每张图像的GT数量
