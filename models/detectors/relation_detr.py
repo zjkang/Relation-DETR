@@ -4,8 +4,10 @@ from typing import Dict, List
 from torch import Tensor, nn
 
 # from models.bricks.denoising import GenerateCDNQueries
-from models.bricks.denoising import StructuredCDNQueries
+# from models.bricks.denoising import StructuredCDNQueries
+from models.bricks.denoising import DiffusionCDNQueries
 from models.detectors.base_detector import DNDETRDetector
+from models.bricks.position_encoding import SinusoidalPositionEmbeddings
 
 import torch
 import torch.distributed as dist
@@ -54,18 +56,35 @@ class RelationDETR(DNDETRDetector):
         #     label_noise_prob=0.5,
         #     box_noise_scale=1.0,
         # )
-        self.denoising_generator = StructuredCDNQueries(
+        # self.denoising_generator = StructuredCDNQueries(
+        #     num_queries=num_queries,
+        #     num_classes=num_classes,
+        #     label_embed_dim=embed_dim,
+        #     denoising_nums=denoising_nums,
+        #     label_noise_prob=0.5,
+        #     box_noise_scale=1.0,
+        # )
+        self.denoising_generator = DiffusionCDNQueries(
             num_queries=num_queries,
             num_classes=num_classes,
             label_embed_dim=embed_dim,
             denoising_nums=denoising_nums,
             label_noise_prob=0.5,
             box_noise_scale=1.0,
+            num_diffusion_steps=10,
+            beta_schedule='linear',
+        )
+        # 输入维度：(batch_size,); 输出维度：(batch_size, embed_dim * 4)
+        time_dim = embed_dim * 4
+        self.time_mlp = nn.Sequential(
+            SinusoidalPositionEmbeddings(embed_dim),
+            nn.Linear(embed_dim, time_dim),
+            nn.GELU(),
+            nn.Linear(time_dim, time_dim),
         )
         self.register_buffer('print_counter', torch.zeros(1, dtype=torch.long))
         self.logger = logging.getLogger(os.path.basename(os.getcwd()) + "." + __name__)
         self.rank = dist.get_rank() if dist.is_initialized() else 0
-
 
     def forward(self, images: List[Tensor], targets: List[Dict] = None):
         # get original image sizes, used for postprocess
@@ -86,12 +105,17 @@ class RelationDETR(DNDETRDetector):
             attn_mask = noised_results[2]
             denoising_groups = noised_results[3]
             max_gt_num_per_image = noised_results[4]
+            diffusion_meta = noised_results[5]
+            # assert t shape (batch_size)
+            time_dim = self.time_mlp(diffusion_meta['timestep'])
         else:
             noised_label_queries = None
             noised_box_queries = None
             attn_mask = None
             denoising_groups = None
             max_gt_num_per_image = None
+            diffusion_meta = None
+            time_dim = None
 
         # feed into transformer
         (
@@ -110,6 +134,7 @@ class RelationDETR(DNDETRDetector):
             noised_label_queries,
             noised_box_queries,
             attn_mask=attn_mask,
+            time_dim=time_dim,
         )
 
         # hack implemantation for distributed training

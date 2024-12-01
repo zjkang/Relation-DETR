@@ -70,6 +70,7 @@ class RelationTransformer(TwostageTransformer):
         noised_label_query=None,
         noised_box_query=None,
         attn_mask=None,
+        time_dim=None,
     ):
         # get input for encoder
         feat_flatten = self.flatten_multi_level(multi_level_feats)
@@ -123,6 +124,7 @@ class RelationTransformer(TwostageTransformer):
             hybrid_enc_class = None
             hybrid_enc_coord = None
 
+        num_denoising_queries = noised_label_query.shape[1] if noised_label_query is not None else 0
         # combine with noised_label_query and noised_box_query for denoising training
         if noised_label_query is not None and noised_box_query is not None:
             target = torch.cat([noised_label_query, target], 1)
@@ -137,6 +139,8 @@ class RelationTransformer(TwostageTransformer):
             level_start_index=level_start_index,
             valid_ratios=valid_ratios,
             attn_mask=attn_mask,
+            time_dim=time_dim,
+            num_denoising_queries=num_denoising_queries,
         )
 
         if self.training:
@@ -349,6 +353,8 @@ class RelationTransformerDecoder(nn.Module):
         key_padding_mask=None,
         attn_mask=None,
         skip_relation=False,
+        time_dim=None,
+        num_denoising_queries=None,
     ):
         outputs_classes, outputs_coords = [], []
         valid_ratio_scale = torch.cat([valid_ratios, valid_ratios], -1)[:, None]
@@ -360,7 +366,7 @@ class RelationTransformerDecoder(nn.Module):
         #     if attn_mask is not None:
         #         pos_relation.masked_fill_(attn_mask, float("-inf"))
 
-        query_predictions = {}
+        # query_predictions = {}
 
         for layer_idx, layer in enumerate(self.layers):
             reference_points_input = reference_points.detach()[:, :, None] * valid_ratio_scale
@@ -378,6 +384,8 @@ class RelationTransformerDecoder(nn.Module):
                 level_start_index=level_start_index,
                 key_padding_mask=key_padding_mask,
                 self_attn_mask=pos_relation,
+                time_dim=time_dim,
+                num_denoising_queries=num_denoising_queries,
             )
 
             # get output, reference_points are not detached for look_forward_twice
@@ -395,15 +403,6 @@ class RelationTransformerDecoder(nn.Module):
 
             # calculate position relation embedding
             # NOTE: prevent memory leak like denoising, or introduce totally separate groups?
-            # if not skip_relation:
-            #     src_boxes = tgt_boxes if layer_idx >= 1 else reference_points
-            #     tgt_boxes = output_coord
-            #     pos_relation = self.position_relation_embedding(src_boxes, tgt_boxes).flatten(0, 1)
-            #     if attn_mask is not None:
-            #         pos_relation.masked_fill_(attn_mask, float("-inf"))
-
-
-            # my possible relation embedding
             if not skip_relation:
                 src_boxes = tgt_boxes if layer_idx >= 1 else reference_points
                 tgt_boxes = output_coord
@@ -411,6 +410,13 @@ class RelationTransformerDecoder(nn.Module):
                 if attn_mask is not None:
                     pos_relation.masked_fill_(attn_mask, float("-inf"))
 
+            # my possible relation embedding
+            # if not skip_relation:
+            #     src_boxes = tgt_boxes if layer_idx >= 1 else reference_points
+            #     tgt_boxes = output_coord
+            #     pos_relation = self.position_relation_embedding(src_boxes, tgt_boxes).flatten(0, 1)
+            #     if attn_mask is not None:
+            #         pos_relation.masked_fill_(attn_mask, float("-inf"))
 
             # if not skip_relation:
             #     # src_boxes = tgt_boxes if layer_idx >= 1 else reference_points
@@ -486,6 +492,12 @@ class RelationTransformerDecoderLayer(nn.Module):
         self.dropout4 = nn.Dropout(dropout)
         self.norm3 = nn.LayerNorm(embed_dim)
 
+        # 只为 denoising queries 添加时间处理, block time mlp
+        self.block_time_mlp = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(embed_dim * 4, embed_dim * 2)
+        )
+
         self.init_weights()
 
     def init_weights(self):
@@ -516,6 +528,8 @@ class RelationTransformerDecoderLayer(nn.Module):
         level_start_index,
         self_attn_mask=None,
         key_padding_mask=None,
+        time_dim=None,
+        num_denoising_queries=None,
     ):
         # self attention
         query_with_pos = key_with_pos = self.with_pos_embed(query, query_pos)
@@ -540,6 +554,24 @@ class RelationTransformerDecoderLayer(nn.Module):
         )
         query = query + self.dropout1(query2)
         query = self.norm1(query)
+
+        if time_dim is not None and num_denoising_queries is not None:
+            # 产生用于特征调制的 scale 和 shift 参数，维度是 [batch_size, embed_dim * 2]
+            scale_shift = self.block_time_mlp(time_dim)
+            # scale_shift 是从时间编码生成的调制参数，原始形状是 [batch_size, embed_dim * 2]
+            # 使用 repeat_interleave 将其在第0维重复 num_denoising_queries 次，使其维度与特征维度匹配
+            # 例如：如果原来是 [2, 512]，num_denoising_queries=100，则变成 [800, 512]
+            scale_shift = torch.repeat_interleave(scale_shift, num_denoising_queries, dim=0)
+            # 将 scale_shift 张量沿着第1维分成两半
+            scale, shift = scale_shift.chunk(2, dim=1)
+
+            # 分离 denoising 和 non-denoising 部分
+            denoising_queries = query[:num_denoising_queries]
+            normal_queries = query[num_denoising_queries:]
+            # 只对 denoising 部分应用时间调制
+            denoising_queries = denoising_queries * (scale + 1) + shift 
+            # 重新组合
+            query = torch.cat([denoising_queries, normal_queries], dim=0)
 
         # ffn
         query = self.forward_ffn(query)

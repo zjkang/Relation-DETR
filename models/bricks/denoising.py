@@ -2,6 +2,7 @@ import torch
 from torch import nn
 from torchvision.ops import boxes as box_ops
 from util.misc import inverse_sigmoid
+import math
 
 
 class GenerateDNQueries(nn.Module):
@@ -424,7 +425,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
+# use structured noise v1
 class StructuredCDNQueries(nn.Module):
     def __init__(
         self,
@@ -499,43 +500,6 @@ class StructuredCDNQueries(nn.Module):
 
         return noised_boxes
 
-    # def apply_structured_noise(self, boxes, box_noise_scale, is_positive):
-    #     """应用结构化噪声"""
-    #     if len(boxes) == 0:
-    #         return boxes
-
-    #     # 1. 计算空间关系
-    #     spatial_relation = self.get_spatial_relations(boxes)
-
-    #     # 2. 生成基础噪声
-    #     diff = torch.zeros_like(boxes)
-    #     diff[:, :2] = boxes[:, 2:] / 2
-    #     diff[:, 2:] = boxes[:, 2:]
-
-    #     # 3. 生成随机噪声
-    #     rand_part = torch.rand_like(boxes)
-    #     if not is_positive:
-    #         rand_part += 1.0  # 负样本增加噪声范围
-
-    #     rand_sign = torch.randint_like(boxes, low=0, high=2, dtype=torch.float32) * 2.0 - 1.0
-    #     rand_part *= rand_sign
-
-    #     # 4. 生成基础噪声
-    #     base_noise = torch.mul(rand_part, diff) * box_noise_scale
-
-    #     # 5. 应用空间约束
-    #     spatial_weights = F.softmax(spatial_relation, dim=1)
-    #     structured_noise = torch.matmul(spatial_weights, base_noise)
-
-    #     # 6. 混合噪声
-    #     final_noise = self.alpha * structured_noise + (1-self.alpha) * base_noise
-
-    #     # 7. 应用噪声
-    #     noised_boxes = boxes + final_noise
-    #     noised_boxes = noised_boxes.clamp(min=0, max=1)
-
-    #     return noised_boxes
-
     def apply_label_noise(self, labels, noise_prob, num_classes):
         if noise_prob > 0:
             noise_labels = torch.randint_like(labels, 0, num_classes)
@@ -554,13 +518,13 @@ class StructuredCDNQueries(nn.Module):
         # 计算query数量
         noised_query_nums = max_gt_num_per_image * self.denoising_groups  # 去噪query数量
         tgt_size = noised_query_nums + self.num_queries  # 总query数量 = 去噪 + 匹配
-        
+
         # 初始化attention mask为False（表示可以相互attend）
         attn_mask = torch.zeros(tgt_size, tgt_size, device=device, dtype=torch.bool)
-        
+
         # 匹配query不能看到去噪query
         attn_mask[noised_query_nums:, :noised_query_nums] = True
-        
+
         # 每组去噪query之间的限制
         for i in range(self.denoising_groups):  # *每组有正负样本应该是可以看到彼此的
             start_col = start_row = max_gt_num_per_image * i
@@ -657,4 +621,299 @@ class StructuredCDNQueries(nn.Module):
             attn_mask,
             self.denoising_groups,
             max_gt_num_per_image * 2,
+        )
+
+
+# ------------------------------------------------------------
+# new idea: diffusion-based denoising
+class DiffusionCDNQueries(GenerateDNQueries):
+    def __init__(
+        self,
+        num_queries: int = 300,
+        num_classes: int = 80,
+        label_embed_dim: int = 256,
+        denoising_nums: int = 100,
+        label_noise_prob: float = 0.5,
+        box_noise_scale: float = 1.0,
+        num_diffusion_steps: int = 10,
+        beta_schedule: str = 'linear'
+    ):
+        super().__init__(
+            num_queries=num_queries,
+            num_classes=num_classes,
+            label_embed_dim=label_embed_dim,
+            label_noise_prob=label_noise_prob,
+            box_noise_scale=box_noise_scale,
+            denoising_groups=1,
+        )
+
+        self.denoising_nums = denoising_nums
+        self.num_diffusion_steps = num_diffusion_steps
+
+        # Setup diffusion hyperparameters
+        if beta_schedule == 'linear':
+            self.betas = torch.linspace(1e-4, 2e-2, num_diffusion_steps)
+        elif beta_schedule == 'cosine':
+            self.betas = self._get_cosine_schedule(num_diffusion_steps)
+
+        # Calculate diffusion parameters
+        self.alphas = 1 - self.betas
+        self.alphas_cumprod = torch.cumprod(self.alphas, dim=0)
+        self.sqrt_alphas_cumprod = torch.sqrt(self.alphas_cumprod)
+        self.sqrt_one_minus_alphas_cumprod = torch.sqrt(1 - self.alphas_cumprod)
+
+    def _get_cosine_schedule(self, num_steps):
+        """Get cosine schedule for beta values"""
+        steps = torch.linspace(0, num_steps, num_steps + 1)
+        s = 0.008
+        x = torch.cos(((steps / num_steps + s) / (1 + s)) * math.pi * 0.5) ** 2
+        betas = torch.clip(1 - x[1:] / x[:-1], 0.0001, 0.9999)
+        return betas
+
+    # def apply_diffusion_noise(self, boxes, t):
+    #     """Apply diffusion noise at timestep t"""
+    #     noise = torch.randn_like(boxes)
+    #     sqrt_alpha_t = self.sqrt_alphas_cumprod[t]
+    #     sqrt_one_minus_alpha_t = self.sqrt_one_minus_alphas_cumprod[t]
+
+    #     # Expand dimensions to match boxes shape
+    #     sqrt_alpha_t = sqrt_alpha_t.to(boxes.device).view(-1, 1)
+    #     sqrt_one_minus_alpha_t = sqrt_one_minus_alpha_t.to(boxes.device).view(-1, 1)
+
+    #     # Apply forward diffusion
+    #     noised_boxes = sqrt_alpha_t * boxes + sqrt_one_minus_alpha_t * noise
+    #     return noised_boxes, noise
+
+    # def generate_diffusion_samples(self, boxes, num_steps=None):
+    #     """Generate a sequence of diffused samples"""
+    #     if num_steps is None:
+    #         num_steps = self.num_diffusion_steps
+
+    #     # Use number of boxes instead of batch_size
+    #     num_boxes = boxes.shape[0]  # Changed from batch_size
+    #     diffusion_steps = torch.randint(0, num_steps, (num_boxes,), device=boxes.device)
+
+    #     noised_boxes_sequence = []
+    #     noise_sequence = []
+
+    #     for t in range(num_steps):
+    #         # Only apply diffusion to boxes that haven't reached their target timestep
+    #         mask = (diffusion_steps >= t).float().view(-1, 1)
+    #         noised_boxes, noise = self.apply_diffusion_noise(boxes, t)
+
+    #         # Store intermediate results
+    #         noised_boxes_sequence.append(noised_boxes * mask + boxes * (1-mask))
+    #         noise_sequence.append(noise)
+
+    #     return noised_boxes_sequence, noise_sequence, diffusion_steps
+
+    def generate_negative_samples(self, gt_boxes, num_negative=None):
+        """生成负样本边界框
+
+        Args:
+            gt_boxes: [N, 4] - 原始GT边界框(cxcywh格式)
+            num_negative: int - 需要生成的负样本数量,默认等于GT数量
+        Returns:
+            negative_boxes: [N, 4] - 生成的负样本边界框
+        """
+        if num_negative is None:
+            num_negative = len(gt_boxes)
+
+        # 1. 随机生成框
+        random_boxes = torch.rand_like(gt_boxes[:num_negative])
+
+        # 2. 基于GT框生成难例
+        # 转换为xyxy格式计算IoU
+        xyxy_gt = box_ops._box_cxcywh_to_xyxy(gt_boxes)
+        ious = box_ops.box_iou(xyxy_gt, xyxy_gt)[0]  # [N, N]
+
+        # 找到每个GT框的相邻框
+        _, neighbor_indices = torch.topk(ious, k=min(3, len(ious)), dim=1)
+
+        hard_negative_boxes = []
+        for i, neighbors in enumerate(neighbor_indices):
+            gt_box = gt_boxes[i]
+            neighbor_boxes = gt_boxes[neighbors]
+
+            # 在相邻框之间的空间生成难例
+            center_x = (neighbor_boxes[:, 0] + gt_box[0]) / 2
+            center_y = (neighbor_boxes[:, 1] + gt_box[1]) / 2
+            width = (neighbor_boxes[:, 2] + gt_box[2]) / 2
+            height = (neighbor_boxes[:, 3] + gt_box[3]) / 2
+
+            hard_negative = torch.stack([center_x, center_y, width, height], dim=1)
+            hard_negative_boxes.append(hard_negative)
+
+        hard_negative_boxes = torch.cat(hard_negative_boxes, dim=0)
+
+        # 3. 合并随机框和难例
+        num_hard = len(hard_negative_boxes)
+        num_random = num_negative - num_hard
+        if num_random > 0:
+            negative_boxes = torch.cat([hard_negative_boxes, random_boxes[:num_random]])
+        else:
+            negative_boxes = hard_negative_boxes[:num_negative]
+
+        return negative_boxes
+
+    # # forward diffusion
+    # def q_sample(self, x_start, t, noise=None):
+    #     if noise is None:
+    #         noise = torch.randn_like(x_start)
+
+    #     sqrt_alphas_cumprod_t = extract(self.sqrt_alphas_cumprod, t, x_start.shape)
+    #     sqrt_one_minus_alphas_cumprod_t = extract(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape)
+
+    #     # 应用扩散过程
+    #     # q(x_t | x_0) = sqrt(α_t) * x_0 + sqrt(1 - α_t) * ε
+    #     return sqrt_alphas_cumprod_t * x_start + sqrt_one_minus_alphas_cumprod_t * noise
+
+    def generate_diffusion_noise(self, boxes, timesteps, noise=None):
+        """生成扩散噪声并应用到边界框
+        Args:
+            boxes: [N, 4] - 原始边界框 (cxcywh格式)
+            timesteps: [N] - 扩散时间步
+        Returns:
+            noised_boxes: [N, 4] - 添加噪声后的边界框
+            noise: [N, 4] - 生成的噪声
+        """
+        # 1. 获取当前时间步的扩散参数
+        alpha_t = self.alphas_cumprod[timesteps].view(-1, 1)  # [N, 1]
+        sigma_t = self.sqrt_one_minus_alphas_cumprod[timesteps].view(-1, 1)  # [N, 1]
+
+        # 2. 生成随机噪声
+        if noise is None:
+            noise = torch.randn_like(boxes)  # [N, 4]
+
+        # 3. 应用扩散过程
+        # q(x_t | x_0) = sqrt(α_t) * x_0 + sqrt(1 - α_t) * ε
+        noised_boxes = torch.sqrt(alpha_t) * boxes + sigma_t * noise
+
+        # 4. 确保框的坐标在有效范围内
+        noised_boxes = noised_boxes.clamp(min=0.0, max=1.0)
+
+        return noised_boxes, noise
+
+    def forward(self, gt_labels_list, gt_boxes_list):
+        """Forward pass with shared timestamp for diffusion-based denoising
+        Args:
+            gt_labels_list: List[Tensor] - 每张图像的GT标签列表
+            gt_boxes_list: List[Tensor] - 每张图像的GT边界框列表 (cxcywh格式)
+
+        Returns:
+            noised_label_queries: [B, N, C] - 带噪声的标签查询
+            noised_box_queries: [B, N, 4] - 带噪声的边界框查询
+            attn_mask: [N, N] - 注意力掩码
+            denoising_groups: int - 去噪组数
+            max_queries_per_img: int - 每张图像的最大查询数
+            diffusion_meta: dict - 扩散过程的元数据
+        """
+        # 1. 基础设置
+        gt_nums_per_image = [x.numel() for x in gt_labels_list]
+        max_gt_num_per_image = max(gt_nums_per_image)
+        batch_size = len(gt_labels_list)
+        device = gt_labels_list[0].device
+
+        # 2. 计算去噪组数
+        denoising_groups = self.denoising_nums * max_gt_num_per_image // max(max_gt_num_per_image**2, 1)
+        self.denoising_groups = max(denoising_groups, 1)
+
+        # 3. 合并所有GT
+        gt_labels = torch.cat(gt_labels_list)
+        gt_boxes = torch.cat(gt_boxes_list)
+
+        # 4. 为每张图片生成随机timestamp
+        timesteps = torch.randint(0, self.num_diffusion_steps, (batch_size,), device=device)
+
+        # 5. 初始化收集列表
+        noised_boxes_list = []
+        noise_list = []
+        all_labels_list = []
+
+        # 对每个去噪组
+        for _ in range(self.denoising_groups):
+             # 将timesteps扩展到对应每个box
+            # 根据每张图片的GT数量重复对应的timestamp
+            expanded_timesteps = torch.repeat_interleave(timesteps, torch.tensor(gt_nums_per_image, dtype=torch.long, device=device))
+
+            # 获取当前组所有图像的正样本
+            pos_boxes, pos_noise = self.generate_diffusion_noise(gt_boxes, expanded_timesteps)
+            # 生成并处理负样本
+            neg_boxes = self.generate_negative_samples(gt_boxes, len(gt_boxes))
+            neg_boxes, neg_noise = self.generate_diffusion_noise(neg_boxes, expanded_timesteps)
+
+            # 添加结果 - 保持顺序：所有正样本，然后所有负样本
+            noised_boxes_list.extend([pos_boxes, neg_boxes])
+            noise_list.extend([pos_noise, neg_noise])
+            all_labels_list.extend([gt_labels, torch.zeros_like(gt_labels)])
+
+        # e.g. gt_nums_per_image = [2, 3], batch_idx = [0, 1]
+        # 7. 合并结果
+        noised_boxes = torch.cat(noised_boxes_list, dim=0)
+        noise = torch.cat(noise_list, dim=0)
+        all_labels = torch.cat(all_labels_list, dim=0)
+
+        # 8. 应用标签噪声
+        noised_labels = self.apply_label_noise(all_labels, self.label_noise_prob, self.num_classes)
+        label_embedding = self.label_encoder(noised_labels)
+
+        # 9. 准备查询
+        noised_query_nums = max_gt_num_per_image * self.denoising_groups * 2  # *2是因为每组有正负样本
+        noised_label_queries = torch.zeros(batch_size, noised_query_nums, self.label_embed_dim, device=device)
+        noised_box_queries = torch.zeros(batch_size, noised_query_nums, 4, device=device)
+
+        # 10. 填充有效查询
+        # then the "batch_idx_per_instance" equals to [0, 0, 1, 1, 1]
+        # which indicates which image the instance (gt box) belongs to.
+        # cuz the instances has been flattened before.
+        batch_idx = torch.arange(batch_size)
+        batch_idx_per_instance = torch.repeat_interleave(
+            batch_idx, torch.tensor(gt_nums_per_image, dtype=torch.long)
+        )
+        # self.denoising_groups = 2,
+        # batch_idx_per_group =
+        # [0, 0, 1, 1, 1,  # group 1 (+ samples)
+        #  0, 0, 1, 1, 1,  # group 1 (- samples)
+        #  0, 0, 1, 1, 1,  # group 2 (+ samples)
+        #  0, 0, 1, 1, 1]  # group 2 (- samples)
+        batch_idx_per_group = batch_idx_per_instance.repeat(self.denoising_groups * 2).flatten()
+
+        if len(gt_nums_per_image):
+            # [0, 1, 0, 1, 2]
+            valid_index_per_group = torch.cat([torch.arange(num) for num in gt_nums_per_image])
+            # i = 0: [0, 1, 0, 1, 2]              # 原始索引
+            # i = 1: [3, 4, 3, 4, 5]              # 原始索引 + 3
+            # i = 2: [6, 7, 6, 7, 8]              # 原始索引 + 6
+            # i = 3: [9, 10, 9, 10, 11]           # 原始索引 + 9
+            valid_index_per_group = torch.cat([
+                valid_index_per_group + max_gt_num_per_image * i
+                for i in range(self.denoising_groups * 2)
+            ]).long()
+
+        if len(batch_idx_per_group):
+            # 实际上等价于:
+            # for i in range(len(batch_idx_per_group)):
+            #     b = batch_idx_per_group[i]
+            #     v = valid_index_per_group[i]
+            #     noised_label_queries[b, v] = label_embedding[i]
+            noised_label_queries[(batch_idx_per_group, valid_index_per_group)] = label_embedding
+            noised_box_queries[(batch_idx_per_group, valid_index_per_group)] = inverse_sigmoid(noised_boxes)
+
+        # 11. 生成注意力掩码
+        attn_mask = self.generate_query_masks(2 * max_gt_num_per_image, device)
+
+        # 12. 准备扩散元数据
+        diffusion_meta = {
+            'timestep': timesteps,
+            'noise': noise,
+            'alpha': self.alphas_cumprod[timesteps]
+        }
+
+        return (
+            noised_label_queries,
+            noised_box_queries,
+            attn_mask,
+            self.denoising_groups,
+            max_gt_num_per_image * 2,
+            diffusion_meta
         )
