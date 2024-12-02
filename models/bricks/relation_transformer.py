@@ -556,22 +556,26 @@ class RelationTransformerDecoderLayer(nn.Module):
         query = self.norm1(query)
 
         if time_dim is not None and num_denoising_queries is not None:
+            B = query.shape[0]  # 从query tensor获取batch size
             # 产生用于特征调制的 scale 和 shift 参数，维度是 [batch_size, embed_dim * 2]
             scale_shift = self.block_time_mlp(time_dim)
             # scale_shift 是从时间编码生成的调制参数，原始形状是 [batch_size, embed_dim * 2]
             # 使用 repeat_interleave 将其在第0维重复 num_denoising_queries 次，使其维度与特征维度匹配
-            # 例如：如果原来是 [2, 512]，num_denoising_queries=100，则变成 [800, 512]
+            # 例如：如果原来是 [2, 512]，num_denoising_queries=200，则变成 400, 512]
             scale_shift = torch.repeat_interleave(scale_shift, num_denoising_queries, dim=0)
             # 将 scale_shift 张量沿着第1维分成两半
-            scale, shift = scale_shift.chunk(2, dim=1)
+            scale, shift = scale_shift.chunk(2, dim=1) # scale, shift: [B * num_denoising_queries, embed_dim] 
+            # 重塑 scale 和 shift 以匹配 denoising_queries 的维度
+            scale = scale.view(B, num_denoising_queries, -1)  # [B, num_denoising_queries, embed_dim]
+            shift = shift.view(B, num_denoising_queries, -1)  # [B, num_denoising_queries, embed_dim]
 
             # 分离 denoising 和 non-denoising 部分
-            denoising_queries = query[:num_denoising_queries]
-            normal_queries = query[num_denoising_queries:]
+            denoising_queries = query[:, :num_denoising_queries] # [B, num_denoising_queries, embed_dim]
+            normal_queries = query[:, num_denoising_queries:] # [B, N-num_denoising_queries, embed_dim]
             # 只对 denoising 部分应用时间调制
             denoising_queries = denoising_queries * (scale + 1) + shift 
             # 重新组合
-            query = torch.cat([denoising_queries, normal_queries], dim=0)
+            query = torch.cat([denoising_queries, normal_queries], dim=1) # [B, N, embed_dim]
 
         # ffn
         query = self.forward_ffn(query)
