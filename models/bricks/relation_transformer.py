@@ -555,7 +555,7 @@ class RelationTransformerDecoderLayer(nn.Module):
         query = query + self.dropout1(query2)
         query = self.norm1(query)
 
-        if time_dim is not None and num_denoising_queries is not None:
+        if time_dim is not None and num_denoising_queries is not None and num_denoising_queries > 0:
             B = query.shape[0]  # 从query tensor获取batch size
             # 产生用于特征调制的 scale 和 shift 参数，维度是 [batch_size, embed_dim * 2]
             scale_shift = self.block_time_mlp(time_dim)

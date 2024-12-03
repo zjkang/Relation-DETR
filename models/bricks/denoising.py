@@ -921,11 +921,11 @@ class StructuredCDNQueries(nn.Module):
 
 class DiffusionCDNQueries(GenerateDNQueries):
     """基于扩散模型的条件去噪查询生成器
-    
+
     Args:
         num_queries (int): 总查询数量. Default: 300
         num_classes (int): 类别数量. Default: 80
-        label_embed_dim (int): 标签嵌入维度. Default: 256 
+        label_embed_dim (int): 标签嵌入维度. Default: 256
         denoising_nums (int): 去噪样本数量. Default: 100
         label_noise_prob (float): 标签噪声概率. Default: 0.5
         box_noise_scale (float): 边界框噪声尺度. Default: 1.0
@@ -979,12 +979,16 @@ class DiffusionCDNQueries(GenerateDNQueries):
             gt_boxes (Tensor): [N, 4] 所有图片的GT边界框(cxcywh格式)
             gt_nums_per_image (List[int]): 每张图片的GT数量列表
             num_negative (int): 需要生成的负样本数量,默认等于GT数量
-            
+
         Returns:
             negative_boxes (Tensor): [N, 4] 生成的负样本边界框
         """
         if num_negative is None:
             num_negative = len(gt_boxes)
+
+        # 如果没有GT boxes，直接返回随机框
+        if len(gt_boxes) == 0:
+            return torch.rand(num_negative, 4, device=gt_boxes.device)
 
         device = gt_boxes.device
         negative_boxes_list = []
@@ -993,11 +997,13 @@ class DiffusionCDNQueries(GenerateDNQueries):
         # 对每张图片分别处理
         for num_gt in gt_nums_per_image:
             if num_gt == 0:
+                # 对于没有GT的图像，生成随机框
+                negative_boxes_list.append(torch.rand(1, 4, device=device))
                 continue
-                
+
             # 获取当前图片的GT boxes
             curr_boxes = gt_boxes[start_idx:start_idx + num_gt]
-            
+
             # 1. 随机生成框
             random_boxes = torch.rand_like(curr_boxes)
 
@@ -1009,7 +1015,7 @@ class DiffusionCDNQueries(GenerateDNQueries):
                 # 找到每个GT框的相邻框
                 k = min(3, num_gt)
                 _, neighbor_indices = torch.topk(ious, k=k, dim=1)
-                
+
                 hard_negative_boxes = []
                 for i, neighbors in enumerate(neighbor_indices):
                     gt_box = curr_boxes[i]
@@ -1026,7 +1032,7 @@ class DiffusionCDNQueries(GenerateDNQueries):
 
                 if hard_negative_boxes:  # 确保列表不为空
                     hard_negative_boxes = torch.cat(hard_negative_boxes, dim=0)
-                    
+
                     # 3. 合并随机框和难例
                     num_hard = len(hard_negative_boxes)
                     num_random = num_gt - num_hard
@@ -1039,23 +1045,34 @@ class DiffusionCDNQueries(GenerateDNQueries):
             else:
                 # 如果只有一个框，直接使用随机框
                 curr_negative_boxes = random_boxes
-                
+
             negative_boxes_list.append(curr_negative_boxes)
             start_idx += num_gt
 
+        # 确保negative_boxes_list不为空
+        if not negative_boxes_list:
+            return torch.rand(num_negative, 4, device=device)
+
         # 合并所有图片的负样本
         negative_boxes = torch.cat(negative_boxes_list, dim=0)
-        
+
+        # 如果生成的负样本数量不够，补充随机框
+        if len(negative_boxes) < num_negative:
+            additional_boxes = torch.rand(num_negative - len(negative_boxes), 4, device=device)
+            negative_boxes = torch.cat([negative_boxes, additional_boxes], dim=0)
+        elif len(negative_boxes) > num_negative:
+            negative_boxes = negative_boxes[:num_negative]
+
         return negative_boxes
 
     def generate_diffusion_noise(self, boxes, timesteps, noise=None):
         """生成扩散噪声并应用到边界框
-        
+
         Args:
             boxes (Tensor): [N, 4] 原始边界框 (cxcywh格式)
             timesteps (Tensor): [N] 扩散时间步
             noise (Tensor, optional): 预定义噪声
-            
+
         Returns:
             noised_boxes (Tensor): [N, 4] 添加噪声后的边界框
             noise (Tensor): [N, 4] 生成的噪声
@@ -1079,14 +1096,14 @@ class DiffusionCDNQueries(GenerateDNQueries):
 
     def forward(self, gt_labels_list, gt_boxes_list):
         """前向传播
-        
+
         Args:
             gt_labels_list (List[Tensor]): 每张图像的GT标签列表
             gt_boxes_list (List[Tensor]): 每张图像的GT边界框列表 (cxcywh格式)
-            
+
         Returns:
             noised_label_queries (Tensor): [B, N, C] 带噪声的标签查询
-            noised_box_queries (Tensor): [B, N, 4] 带噪声的边界框查询  
+            noised_box_queries (Tensor): [B, N, 4] 带噪声的边界框查询
             attn_mask (Tensor): [N, N] 注意力掩码
             denoising_groups (int): 去噪组数
             max_queries_per_img (int): 每张图像的最大查询数
@@ -1118,7 +1135,7 @@ class DiffusionCDNQueries(GenerateDNQueries):
         for _ in range(self.denoising_groups):
             # 将timesteps扩展到对应每个box
             expanded_timesteps = torch.repeat_interleave(
-                timesteps, 
+                timesteps,
                 torch.tensor(gt_nums_per_image, dtype=torch.long, device=device)
             )
 
@@ -1150,7 +1167,7 @@ class DiffusionCDNQueries(GenerateDNQueries):
         # 10. 填充有效查询
         batch_idx = torch.arange(batch_size)
         batch_idx_per_instance = torch.repeat_interleave(
-            batch_idx, 
+            batch_idx,
             torch.tensor(gt_nums_per_image, dtype=torch.long)
         )
         batch_idx_per_group = batch_idx_per_instance.repeat(self.denoising_groups * 2).flatten()
