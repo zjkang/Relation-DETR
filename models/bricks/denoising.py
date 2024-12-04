@@ -1119,13 +1119,14 @@ class DiffusionCDNQueries(GenerateDNQueries):
         denoising_groups = self.denoising_nums * max_gt_num_per_image // max(max_gt_num_per_image**2, 1)
         self.denoising_groups = max(denoising_groups, 1)
 
-        # 为每张图片生成随机timestamp
+        # 为每张图片生成随机timestamp, 扩展时间步到每个box
         timesteps = torch.randint(0, self.num_diffusion_steps, (batch_size,), device=device)
-        # 将timesteps扩展到对应每个box
         expanded_timesteps = torch.repeat_interleave(
             timesteps,
             torch.tensor(gt_nums_per_image, dtype=torch.long, device=device)
         )
+        # 为每个组和正负样本复制时间步
+        expanded_timesteps = expanded_timesteps.repeat(self.denoising_groups * 2)  # [N*groups*2]
 
         # 修改正负样本生成逻辑
         gt_labels = torch.cat(gt_labels_list)  # [N]
@@ -1135,7 +1136,6 @@ class DiffusionCDNQueries(GenerateDNQueries):
         # noised_boxes_list = []
         # noise_list = []
         # all_labels_list = []
-
         # # 6. 对每个去噪组生成样本
         # for _ in range(self.denoising_groups):
         #     # 获取当前组所有图像的正样本
@@ -1149,26 +1149,41 @@ class DiffusionCDNQueries(GenerateDNQueries):
         #     noise_list.extend([pos_noise, neg_noise])
         #     all_labels_list.extend([gt_labels, torch.zeros_like(gt_labels)])
 
-        # 生成正样本 - 添加小噪声
-        pos_labels = gt_labels.repeat(self.denoising_groups, 1).flatten()  # [N*groups]
+        # 生成正样本box
         pos_boxes = gt_boxes.repeat(self.denoising_groups, 1)             # [N*groups, 4]
-        pos_labels = self.apply_label_noise(pos_labels, self.label_noise_prob * 0.5, self.num_classes)
-        pos_boxes, pos_noise = self.generate_diffusion_noise(pos_boxes, expanded_timesteps)
+        pos_boxes, pos_noise = self.generate_diffusion_noise(
+            pos_boxes, 
+            expanded_timesteps[:len(pos_boxes)]
+        )
 
-        # 生成负样本 - 添加大噪声
-        neg_labels = gt_labels.repeat(self.denoising_groups, 1).flatten()  # [N*groups] 
+        # 生成负样本box
         neg_boxes = self.generate_negative_samples(gt_boxes, gt_nums_per_image, len(gt_boxes))
         neg_boxes = neg_boxes.repeat(self.denoising_groups, 1)            # [N*groups, 4]
-        neg_labels = self.apply_label_noise(neg_labels, self.label_noise_prob, self.num_classes)  # 更大的噪声概率
-        neg_boxes, neg_noise = self.generate_diffusion_noise(neg_boxes, expanded_timesteps)
+        neg_boxes, neg_noise = self.generate_diffusion_noise(
+            neg_boxes,
+            expanded_timesteps[len(pos_boxes):len(pos_boxes)*2]
+        )
 
-        # 合并正负样本
-        noised_labels = torch.cat([pos_labels, neg_labels])  # [N*groups*2]
-        noised_boxes = torch.cat([pos_boxes, neg_boxes])     # [N*groups*2, 4]
-        noise = torch.cat([pos_noise, neg_noise])           # [N*groups*2, 4]
+        # 交错组织正负样本
+        total_pairs = len(gt_labels) * self.denoising_groups
+        noise = torch.zeros(total_pairs * 2, 4, device=device)
+        noised_boxes = torch.zeros(total_pairs * 2, 4, device=device)
+        noised_labels = torch.zeros(total_pairs * 2, device=device, dtype=torch.long)
 
-        # 应用标签噪声
-        noised_labels = self.apply_label_noise(gt_labels, self.label_noise_prob * 0.5, self.num_classes)
+        # 使用高级索引实现交错
+        even_indices = torch.arange(0, total_pairs * 2, 2, device=device)
+        odd_indices = torch.arange(1, total_pairs * 2, 2, device=device)
+
+        # 填充正负样本boxes
+        noised_boxes[even_indices] = pos_boxes
+        noised_boxes[odd_indices] = neg_boxes
+        noise[even_indices] = pos_noise
+        noise[odd_indices] = neg_noise
+
+        # 填充正负样本labels, 应用标签噪声
+        noised_labels[even_indices] = gt_labels.repeat(self.denoising_groups)  # 正样本使用原始标签
+        noised_labels[odd_indices] = torch.zeros_like(gt_labels).repeat(self.denoising_groups)  # 负样本使用0标签
+        noised_labels = self.apply_label_noise(noised_labels, self.label_noise_prob * 0.5, self.num_classes)
         label_embedding = self.label_encoder(noised_labels)
 
         # 准备查询
