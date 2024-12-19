@@ -288,10 +288,10 @@ class RelationTransformerDecoder(nn.Module):
         # parameters
         self.embed_dim = decoder_layer.embed_dim
         self.num_heads = decoder_layer.num_heads
+        self.num_relation_heads = decoder_layer.num_relation_heads
         self.num_layers = num_layers
         self.num_classes = num_classes
         self.num_votes = num_votes
-
 
         # decoder layers and embedding
         self.layers = nn.ModuleList([copy.deepcopy(decoder_layer) for _ in range(num_layers)])
@@ -311,7 +311,8 @@ class RelationTransformerDecoder(nn.Module):
         #     self.embed_dim, self.num_heads, self.num_votes)
         # self.position_relation_embedding = DualLayerBoxRelationEncoder(self.embed_dim, 16, self.num_heads)
         # self.position_relation_embedding = PositionRelationEmbeddingV2(16, self.num_heads)
-        self.position_relation_embedding = WeightedLayerBoxRelationEncoder(16, self.num_heads, num_layers=self.num_layers)
+        # self.position_relation_embedding = WeightedLayerBoxRelationEncoder(16, self.num_heads, num_layers=self.num_layers)
+        self.position_relation_embedding = PositionRelationEmbeddingV3(16, self.num_relation_heads)
 
         self.init_weights()
 
@@ -345,12 +346,15 @@ class RelationTransformerDecoder(nn.Module):
         outputs_classes, outputs_coords = [], []
         valid_ratio_scale = torch.cat([valid_ratios, valid_ratios], -1)[:, None]
 
-        pos_relation = attn_mask  # fallback pos_relation to attn_mask
-        # NOTE: for changes not related to previous boxes, skip_relation is True
+        # currently pos_relation is the same as attn_mask
+        pos_relation_mask = attn_mask  # fallback pos_relation to attn_mask
+
+        # # NOTE: for changes not related to previous boxes, skip_relation is True
         if not skip_relation:
-            pos_relation = self.position_relation_embedding(reference_points, 0).flatten(0, 1)
-            if attn_mask is not None:
-                pos_relation.masked_fill_(attn_mask, float("-inf"))
+            # [batch_size, num_relation_heads, num_queries, num_queries]
+            relation_weights = self.position_relation_embedding(reference_points)
+            # if attn_mask is not None:
+            #     pos_relation.masked_fill_(attn_mask, float("-inf"))
 
         for layer_idx, layer in enumerate(self.layers):
             reference_points_input = reference_points.detach()[:, :, None] * valid_ratio_scale
@@ -367,7 +371,8 @@ class RelationTransformerDecoder(nn.Module):
                 spatial_shapes=spatial_shapes,
                 level_start_index=level_start_index,
                 key_padding_mask=key_padding_mask,
-                self_attn_mask=pos_relation,
+                self_attn_mask=pos_relation_mask,
+                relation_weights=relation_weights,
             )
 
             # get output, reference_points are not detached for look_forward_twice
@@ -397,10 +402,9 @@ class RelationTransformerDecoder(nn.Module):
             if not skip_relation:
                 # src_boxes = tgt_boxes if layer_idx >= 1 else reference_points
                 tgt_boxes = output_coord
-                pos_relation = self.position_relation_embedding(tgt_boxes, layer_idx + 1).flatten(0, 1)
-                if attn_mask is not None:
-                    pos_relation.masked_fill_(attn_mask, float("-inf"))
-
+                relation_weights = self.position_relation_embedding(tgt_boxes)
+                # if attn_mask is not None:
+                #     pos_relation.masked_fill_(attn_mask, float("-inf"))
 
             # iterative bounding box refinement
             reference_points = inverse_sigmoid(reference_points.detach())
@@ -418,6 +422,7 @@ class RelationTransformerDecoderLayer(nn.Module):
         embed_dim=256,
         d_ffn=1024,
         n_heads=8,
+        n_relation_heads=4,  # 新增参数
         dropout=0.1,
         activation=nn.ReLU(inplace=True),
         n_levels=4,
@@ -426,15 +431,19 @@ class RelationTransformerDecoderLayer(nn.Module):
         super().__init__()
         self.embed_dim = embed_dim
         self.num_heads = n_heads
+        self.num_relation_heads = n_relation_heads
         # cross attention
         self.cross_attn = MultiScaleDeformableAttention(embed_dim, n_levels, n_heads, n_points)
         self.dropout1 = nn.Dropout(dropout)
         self.norm1 = nn.LayerNorm(embed_dim)
 
-        # self attention
-        self.self_attn = nn.MultiheadAttention(
-            embed_dim, n_heads, dropout=dropout, batch_first=True
-        )
+        # 替换原有的self_attn
+        self.self_attn = RelationAwareAttention(
+            embed_dim, n_heads, n_relation_heads, dropout=dropout,batch_first=True)
+        # # original attention: self attention
+        # self.self_attn = nn.MultiheadAttention(
+        #     embed_dim, n_heads, dropout=dropout, batch_first=True
+        # )
         self.dropout2 = nn.Dropout(dropout)
         self.norm2 = nn.LayerNorm(embed_dim)
 
@@ -474,6 +483,7 @@ class RelationTransformerDecoderLayer(nn.Module):
         value,
         spatial_shapes,
         level_start_index,
+        relation_weights=None,
         self_attn_mask=None,
         key_padding_mask=None,
     ):
@@ -483,6 +493,7 @@ class RelationTransformerDecoderLayer(nn.Module):
             query=query_with_pos,
             key=key_with_pos,
             value=query,
+            relation_weights=relation_weights,
             attn_mask=self_attn_mask,
             need_weights=False,
         )[0]
@@ -566,9 +577,9 @@ class PositionRelationEmbedding(nn.Module):
 
 
 # -----------------------------------------------------------------------------------
-# START: only consider reference points (current box) on current layer using the same box relation encoding (delta_xy, delta_wh)
-# layer0: learnable pos_embedding
-class PositionRelationEmbeddingV2(nn.Module):
+# START: Relation Networks for Object Detection
+# generate relation-weights to be used similar to position-embedding
+class PositionRelationEmbeddingV3(nn.Module):
     def __init__(
         self,
         embed_dim=256,
@@ -579,6 +590,13 @@ class PositionRelationEmbeddingV2(nn.Module):
         inplace=True,
     ):
         super().__init__()
+        self.pos_func = functools.partial(
+            get_sine_pos_embed,
+            num_pos_feats=embed_dim,
+            temperature=temperature,
+            scale=scale,
+            exchange_xy=False,
+        )
         self.pos_proj = Conv2dNormActivation(
             embed_dim * 4,
             num_heads,
@@ -587,13 +605,12 @@ class PositionRelationEmbeddingV2(nn.Module):
             norm_layer=None,
             activation_layer=activation_layer,
         )
-        self.pos_func = functools.partial(
-            get_sine_pos_embed,
-            num_pos_feats=embed_dim,
-            temperature=temperature,
-            scale=scale,
-            exchange_xy=False,
-        )
+        # # pos_proj: 将位置关系映射为标量权重
+        # self.pos_proj = nn.Sequential(
+        #     nn.Linear(embed_dim * 4, embed_dim * 2),  # *4 因为embed_dim后的维度是embed_dim*4
+        #     nn.ReLU(inplace=True),
+        #     nn.Linear(embed_dim * 2, 1)
+        # )
 
     def forward(self, src_boxes: Tensor):
         tgt_boxes = src_boxes # target boxes are the same as source boxes
@@ -602,10 +619,12 @@ class PositionRelationEmbeddingV2(nn.Module):
         torch._assert(src_boxes.shape[-1] == 4, f"src_boxes much have 4 coordinates")
         torch._assert(tgt_boxes.shape[-1] == 4, f"tgt_boxes must have 4 coordinates")
         with torch.no_grad():
+            # [batch_size, num_queries, num_queries, 4]
             pos_embed = box_rel_encoding(src_boxes, tgt_boxes)
+            # [batch_size, embed_dim*4, num_queries, num_queries]
             pos_embed = self.pos_func(pos_embed).permute(0, 3, 1, 2)
         pos_embed = self.pos_proj(pos_embed)
-
+        # [batch_size, num_heads, num_queries, num_queries]
         return pos_embed.clone()
 # --------------------------------------------------------------------------------------------------
 
@@ -1122,191 +1141,22 @@ def box_iou(boxes1, boxes2):
 
 
 # --------------------------------------------------------------------------------------------------
-# START (V1.3): decoder-mul-relation with weighted layer-wise relation V3
-class WeightedLayerBoxRelationEncoder(nn.Module):
-    def __init__(
-        self,
-        embed_dim=256,
-        num_heads=8,
-        temperature=10000.,
-        scale=100.,
-        activation_layer=nn.ReLU,
-        inplace=True,
-        num_layers=6,
-    ):
-        super().__init__()
-        # 原有的初始化
-        self.pos_proj = Conv2dNormActivation(
-            embed_dim * 7,  # 7 = 2(距离) + 2(尺度) + 2(方向) + 1(IoU)
-            num_heads,
-            kernel_size=1,
-            inplace=inplace,
-            norm_layer=None,
-            activation_layer=activation_layer,
-        )
-        self.pos_func = functools.partial(
-            get_sine_pos_embed,
-            num_pos_feats=embed_dim,
-            temperature=temperature,
-            scale=scale,
-            exchange_xy=False,
-        )
-        
-        # 添加多尺度权重
-        self.scale_weights = nn.Parameter(torch.ones(num_layers, 3))  # 3个尺度的权重
-        self.num_layers = num_layers
-        self.embed_dim = embed_dim
-        self.register_buffer('layer_idx', torch.zeros(1, dtype=torch.long))
-        self.eps = 1e-5
-        self.register_buffer('print_counter', torch.zeros(1, dtype=torch.long))
-        self.logger = logging.getLogger(os.path.basename(os.getcwd()) + "." + __name__)
-
-    def forward(self, src_boxes: Tensor, layer_idx: Optional[int] = None):
-        tgt_boxes = src_boxes
-        torch._assert(src_boxes.shape[-1] == 4, f"src_boxes much have 4 coordinates")
-        torch._assert(tgt_boxes.shape[-1] == 4, f"tgt_boxes must have 4 coordinates")
-
-        # 使用当前层索引或传入的层索引
-        curr_layer = self.layer_idx.item() if layer_idx is None else layer_idx
-        curr_layer = min(curr_layer, self.num_layers - 1)
-        layer_ratio = curr_layer / (self.num_layers - 1)
-
-        with torch.no_grad():
-            xy1, wh1 = src_boxes.split([2, 2], -1)
-            xy2, wh2 = tgt_boxes.split([2, 2], -1)
-
-            # 1. 计算相对距离
-            delta_xy = torch.abs(xy1.unsqueeze(-2) - xy2.unsqueeze(-3))
-            relative_dist = delta_xy / (wh1.unsqueeze(-2) + self.eps)
-
-            # 2. 计算多尺度距离特征
-            # 局部注意力 - 强调近距离关系
-            local_distance = torch.exp(-relative_dist)
-            
-            # 中等范围注意力 - 使用高斯核
-            med_scale = 2.0 + layer_ratio * 3.0  # 随层数增加范围
-            medium_distance = torch.exp(-relative_dist**2 / (2 * med_scale**2))
-            
-            # 全局注意力 - 弱距离依赖
-            global_distance = torch.ones_like(local_distance) * 0.5
-
-            # 3. 计算尺度特征
-            wh_ratio = torch.log(
-                (wh1.unsqueeze(-2) + self.eps) / (wh2.unsqueeze(-3) + self.eps))
-            
-            # 多尺度尺度特征
-            local_scale = torch.exp(-torch.abs(wh_ratio))
-            medium_scale = torch.exp(-wh_ratio**2 / (2 * med_scale**2))
-            global_scale = torch.ones_like(local_scale) * 0.5
-
-            # 4. 方向特征
-            raw_delta_xy = xy1.unsqueeze(-2) - xy2.unsqueeze(-3)
-            theta = torch.atan2(raw_delta_xy[..., 1], raw_delta_xy[..., 0])
-            dir_embed = torch.stack([torch.cos(theta), torch.sin(theta)], dim=-1)
-            
-            # 5. IoU特征
-            iou = box_iou(src_boxes, tgt_boxes)
-
-            # 6. 组合多尺度特征
-            # 局部特征
-            local_features = torch.cat([
-                local_distance,          # [B, N, N, 2]
-                local_scale,            # [B, N, N, 2]
-                dir_embed,              # [B, N, N, 2]
-                iou.unsqueeze(-1)       # [B, N, N, 1]
-            ], dim=-1)
-            
-            # 中等范围特征
-            medium_features = torch.cat([
-                medium_distance,         # [B, N, N, 2]
-                medium_scale,           # [B, N, N, 2]
-                dir_embed,              # [B, N, N, 2]
-                iou.unsqueeze(-1)       # [B, N, N, 1]
-            ], dim=-1)
-            
-            # 全局特征
-            global_features = torch.cat([
-                global_distance,         # [B, N, N, 2]
-                global_scale,           # [B, N, N, 2]
-                torch.zeros_like(dir_embed),  # [B, N, N, 2]
-                iou.unsqueeze(-1)       # [B, N, N, 1]
-            ], dim=-1)
-
-            # 7. 转换为位置编码
-            local_pos = self.pos_func(local_features).permute(0, 3, 1, 2)
-            medium_pos = self.pos_func(medium_features).permute(0, 3, 1, 2)
-            global_pos = self.pos_func(global_features).permute(0, 3, 1, 2)
-
-             # 堆叠所有尺度的特征 [B, 3, embed_dim * 7, N, N]
-            stacked_pos = torch.stack([local_pos, medium_pos, global_pos], dim=1)
-
-        # 应用可学习权重（确保梯度传播）
-        weights = F.softmax(self.scale_weights[curr_layer], dim=0)  # [3]
-        weights = weights.view(1, 3, 1, 1, 1)  # [1, 3, 1, 1, 1]
-       
-        # 使用einsum进行加权求和
-        pos_embed = torch.einsum('bscdn,s->bcdn', stacked_pos, weights.squeeze())
-        # 或使用普通的矩阵运算
-        # pos_embed = (stacked_pos * weights).sum(dim=1)
-
-        # 10. 投影到最终的注意力权重
-        pos_embed = self.pos_proj(pos_embed)
-
-        # 更新层索引
-        if layer_idx is None:
-            self.layer_idx += 1
-            if self.layer_idx >= self.num_layers:
-                self.layer_idx.zero_()
-
-        # 监控权重变化
-        if self.training and (dist.get_rank() == 0):
-            self.print_counter += 1
-            if self.print_counter % 100 == 0:  # 每100次迭代打印一次
-                weights = F.softmax(self.scale_weights, dim=1).detach().cpu().numpy()
-                self.logger.info("\nCurrent weights for each layer:")
-                for i in range(self.num_layers):
-                    self.logger.info(f"Layer {i}: Local={weights[i,0]:.3f}, "
-                          f"Medium={weights[i,1]:.3f}, "
-                          f"Global={weights[i,2]:.3f}\n")
-
-        return pos_embed.clone()
-# END: decoder-mul-relation with weighted layer-wise relation V3
-# --------------------------------------------------------------------------------------------------
-
-
-
-# --------------------------------------------------------------------------------------------------
+# START (V2.0): decoder-mul-relation with weighted layer-wise relation V2.0
 # class WeightedLayerBoxRelationEncoder(nn.Module):
 #     def __init__(
-#             self,
-#             embed_dim=256,
-#             spatial_dim=256,
-#             num_heads=8,
-#             temperature=10000.,
-#             scale=100.,
-#             activation_layer=nn.ReLU,
-#             inplace=True,):
+#         self,
+#         embed_dim=256,
+#         num_heads=8,
+#         temperature=10000.,
+#         scale=100.,
+#         activation_layer=nn.ReLU,
+#         inplace=True,
+#         num_layers=6,
+#     ):
 #         super().__init__()
-#         self.embed_dim = embed_dim
-#         self.spatial_dim = spatial_dim
-#         self.num_heads = num_heads
-
-#         # # 当前层的空间关系编码
-#         # self.current_relation = nn.Sequential(
-#         #     nn.Linear(9, d_model),
-#         #     nn.ReLU(),
-#         #     nn.Linear(d_model, num_heads)
-#         # )
-
-#         # # 层间关系编码
-#         # self.inter_layer_relation = nn.Sequential(
-#         #     nn.Linear(13, d_model),  # 13 = 9(当前层特征) + 4(与上一层的变化量)
-#         #     nn.ReLU(),
-#         #     nn.Linear(d_model, num_heads)
-#         # )
-
+#         # 原有的初始化
 #         self.pos_proj = Conv2dNormActivation(
-#             spatial_dim * 10, # 10 = 9(当前层特征) + 1(content编码)
+#             embed_dim * 7,  # 7 = 2(距离) + 2(尺度) + 2(方向) + 1(IoU)
 #             num_heads,
 #             kernel_size=1,
 #             inplace=inplace,
@@ -1315,237 +1165,240 @@ class WeightedLayerBoxRelationEncoder(nn.Module):
 #         )
 #         self.pos_func = functools.partial(
 #             get_sine_pos_embed,
-#             num_pos_feats=spatial_dim,
+#             num_pos_feats=embed_dim,
 #             temperature=temperature,
 #             scale=scale,
 #             exchange_xy=False,
 #         )
+#         # 添加多尺度权重
+#         self.scale_weights = nn.Parameter(torch.ones(num_layers, 3))  # 3个尺度的权重
+#         self.num_layers = num_layers
+#         self.embed_dim = embed_dim
+#         self.register_buffer('layer_idx', torch.zeros(1, dtype=torch.long))
+#         self.eps = 1e-5
+#         self.register_buffer('print_counter', torch.zeros(1, dtype=torch.long))
+#         self.logger = logging.getLogger(os.path.basename(os.getcwd()) + "." + __name__)
 
-#         self.hybrid_similarity = HybridSimilarity(embed_dim, spatial_dim)
+#     def forward(self, src_boxes: Tensor, layer_idx: Optional[int] = None):
+#         tgt_boxes = src_boxes
+#         torch._assert(src_boxes.shape[-1] == 4, f"src_boxes much have 4 coordinates")
+#         torch._assert(tgt_boxes.shape[-1] == 4, f"tgt_boxes must have 4 coordinates")
 
-#     def compute_box_relation_features(self, ref_boxes):
-#         """计算单层的box关系特征"""
-#         B, N, _ = ref_boxes.shape
-
-#         # 提取box信息
-#         xy = ref_boxes[..., :2]
-#         wh = ref_boxes[..., 2:]
-
-#         # 计算中心点距离和归一化
-#         delta_xy = xy.unsqueeze(1) - xy.unsqueeze(2)  # [B, N, N, 2]
-#         avg_wh = (wh.unsqueeze(1) + wh.unsqueeze(2)) / 2  # [B, N, N, 2]
-#         normalized_delta = delta_xy / (avg_wh + 1e-6)  # [B, N, N, 2]
-
-#         # 宽高比例
-#         wh_ratio = torch.log(wh.unsqueeze(1) / (wh.unsqueeze(2) + 1e-6))  # [B, N, N, 2]
-
-#         # IoU
-#         iou = box_iou(ref_boxes, ref_boxes)
-
-#         # 方向编码
-#         # rho = torch.norm(delta_xy, dim=-1)
-#         theta = torch.atan2(delta_xy[..., 1], delta_xy[..., 0])
-#         dir_sin = torch.sin(theta)
-#         dir_cos = torch.cos(theta)
-#         # 简单的角度量化
-#         # theta = torch.atan2(delta_xy[..., 1], delta_xy[..., 0])
-#         # angle_bins = quantize_angle(theta, num_bins=8)
-
-#         # 相对宽高
-#         relative_wh = wh.unsqueeze(1) - wh.unsqueeze(2)
-
-#         # 组合特征
-#         spatial_features = torch.cat([
-#             normalized_delta,          # [B, N, N, 2]
-#             wh_ratio,                  # [B, N, N, 2]
-#             iou.unsqueeze(-1),        # [B, N, N, 1]
-#             dir_sin.unsqueeze(-1),    # [B, N, N, 1]
-#             dir_cos.unsqueeze(-1),    # [B, N, N, 1]
-#             relative_wh               # [B, N, N, 2]
-#         ], dim=-1)
-
-#         return spatial_features
-
-
-#     def compute_layer_transition(self, current_boxes, previous_boxes):
-#         """计算两层之间的box变化"""
-#         # 计算box变化量
-#         delta_center = current_boxes[..., :2] - previous_boxes[..., :2]  # 中心点变化
-#         delta_size = torch.log(current_boxes[..., 2:] / (previous_boxes[..., 2:] + 1e-6))  # 尺寸变化
-
-#         # 将变化量扩展到N×N的pair矩阵
-#         delta_center = delta_center.unsqueeze(2) - delta_center.unsqueeze(1)  # [B, N, N, 2]
-#         delta_size = delta_size.unsqueeze(2) - delta_size.unsqueeze(1)  # [B, N, N, 2]
-
-#         return torch.cat([delta_center, delta_size], dim=-1)  # [B, N, N, 4]
-
-
-#     def forward(self, queries, current_boxes, previous_boxes=None):
-#         """
-#         current_boxes: 当前层的参考框 [B, N, 4]
-#         previous_boxes: 上一层的参考框 [B, N, 4]
-#         """
-#         # 检查输入
-#         assert (current_boxes[..., 2:] > 0).all(), "Current boxes must have positive width/height"
-#         if previous_boxes is not None:
-#             assert (previous_boxes[..., 2:] > 0).all(), "Previous boxes must have positive width/height"
+#         # 使用当前层索引或传入的层索引
+#         curr_layer = self.layer_idx.item() if layer_idx is None else layer_idx
+#         curr_layer = min(curr_layer, self.num_layers - 1)
+#         layer_ratio = curr_layer / (self.num_layers - 1)
 
 #         with torch.no_grad():
-#             # 计算当前层的空间关系特征
-#             current_features = self.compute_box_relation_features(current_boxes)
+#             xy1, wh1 = src_boxes.split([2, 2], -1)
+#             xy2, wh2 = tgt_boxes.split([2, 2], -1)
 
-#             # if previous_boxes is None:
-#             #     # 如果是第一层，只使用当前层的特征
-#             #     relation_embed = self.current_relation(current_features)
-#             # else:
-#             # 计算层间变化
-#             # transition_features = self.compute_layer_transition(current_boxes, previous_boxes)
+#             # 1. 计算相对距离
+#             delta_xy = torch.abs(xy1.unsqueeze(-2) - xy2.unsqueeze(-3))
+#             relative_dist = delta_xy / (wh1.unsqueeze(-2) + self.eps)
+#             # 使用log函数计算多尺度距离特征
+#             # 局部注意力 - 强调近距离关系
+#             local_distance = -torch.log(relative_dist + 1.0) # 距离越小,值越大
+#             # 中等范围注意力
+#             med_scale = 2.0 + layer_ratio * 3.0  # 随层数增加范围
+#             medium_distance = -torch.log(relative_dist/med_scale + 1.0)
+#             # 全局注意力保持不变
+#             global_distance = torch.ones_like(local_distance) * 0.5
 
-#             # 组合当前层特征和层间变化特征
-#             combined_features = torch.cat([current_features], dim=-1)
-#             # [B, 9 * spatial_dim, N, N]
-#             pos_embed = self.pos_func(combined_features).permute(0, 3, 1, 2)
+#             # 2. 计算尺度特征
+#             wh_ratio = torch.log((wh1.unsqueeze(-2) + self.eps) / (wh2.unsqueeze(-3) + self.eps))
+#             # 多尺度尺度特征
+#             local_scale = -torch.log(torch.abs(wh_ratio) + 1.0)
+#             medium_scale = -torch.log(torch.abs(wh_ratio)/med_scale + 1.0)
+#             global_scale = torch.ones_like(local_scale) * 0.5
 
-#         # [B, spatial_dim, N, N]
-#         content_embed = self.hybrid_similarity(queries).permute(0, 3, 1, 2)
+#             # 4. 方向特征
+#             raw_delta_xy = xy1.unsqueeze(-2) - xy2.unsqueeze(-3)
+#             theta = torch.atan2(raw_delta_xy[..., 1], raw_delta_xy[..., 0])
+#             dir_embed = torch.stack([torch.cos(theta), torch.sin(theta)], dim=-1)
 
-#         # [B, num_heads, N, N]
-#         pos_embed = self.pos_proj(torch.cat([pos_embed, content_embed], dim=1))
+#             # 5. IoU特征
+#             iou = box_iou(src_boxes, tgt_boxes)
 
-#         # pos_embed = self.pos_proj(self.pos_func(combined_features).permute(0, 3, 1, 2)) # [B, num_heads, N, N]
+#             # 6. 组合多尺度特征
+#             # 局部特征
+#             local_features = torch.cat([
+#                 local_distance,          # [B, N, N, 2]
+#                 local_scale,            # [B, N, N, 2]
+#                 dir_embed,              # [B, N, N, 2]
+#                 iou.unsqueeze(-1)       # [B, N, N, 1]
+#             ], dim=-1)
 
-#         # pos_embed = self.inter_layer_relation(combined_features)
-#         ## 调整维度顺序
-#         # pos_embed = relation_embed.permute(0, 3, 1, 2)  # [B, num_heads, N, N]
+#             # 中等范围特征
+#             medium_features = torch.cat([
+#                 medium_distance,         # [B, N, N, 2]
+#                 medium_scale,           # [B, N, N, 2]
+#                 dir_embed,              # [B, N, N, 2]
+#                 iou.unsqueeze(-1)       # [B, N, N, 1]
+#             ], dim=-1)
+
+#             # 全局特征
+#             global_features = torch.cat([
+#                 global_distance,         # [B, N, N, 2]
+#                 global_scale,           # [B, N, N, 2]
+#                 torch.zeros_like(dir_embed),  # [B, N, N, 2]
+#                 iou.unsqueeze(-1)       # [B, N, N, 1]
+#             ], dim=-1)
+
+#             # 7. 转换为位置编码
+#             local_pos = self.pos_func(local_features).permute(0, 3, 1, 2)
+#             medium_pos = self.pos_func(medium_features).permute(0, 3, 1, 2)
+#             global_pos = self.pos_func(global_features).permute(0, 3, 1, 2)
+
+#              # 堆叠所有尺度的特征 [B, 3, embed_dim * 7, N, N]
+#             stacked_pos = torch.stack([local_pos, medium_pos, global_pos], dim=1)
+
+#         # 应用可学习权重（确保梯度传播）
+#         weights = F.softmax(self.scale_weights[curr_layer], dim=0)  # [3]
+#         weights = weights.view(1, 3, 1, 1, 1)  # [1, 3, 1, 1, 1]
+
+#         # 使用einsum进行加权求和
+#         pos_embed = torch.einsum('bscdn,s->bcdn', stacked_pos, weights.squeeze())
+#         # 或使用普通的矩阵运算
+#         # pos_embed = (stacked_pos * weights).sum(dim=1)
+
+#         # 10. 投影到最终的注意力权重
+#         pos_embed = self.pos_proj(pos_embed)
+
+#         # 更新层索引
+#         if layer_idx is None:
+#             self.layer_idx += 1
+#             if self.layer_idx >= self.num_layers:
+#                 self.layer_idx.zero_()
+
+#         # 监控权重变化
+#         if self.training and (dist.get_rank() == 0):
+#             self.print_counter += 1
+#             if self.print_counter % 100 == 0:  # 每100次迭代打印一次
+#                 weights = F.softmax(self.scale_weights, dim=1).detach().cpu().numpy()
+#                 self.logger.info("\nCurrent weights for each layer:")
+#                 for i in range(self.num_layers):
+#                     self.logger.info(f"Layer {i}: Local={weights[i,0]:.3f}, "
+#                           f"Medium={weights[i,1]:.3f}, "
+#                           f"Global={weights[i,2]:.3f}\n")
 
 #         return pos_embed.clone()
-
-
+# END: decoder-mul-relation with weighted layer-wise relation V3
 # --------------------------------------------------------------------------------------------------
-# class HybridSimilarity(nn.Module):
-#     def __init__(self, embed_dim, spatial_dim, num_bins=32):
-#         super().__init__()
-#         self.num_bins = num_bins
-
-#         # 特征相似度编码
-#         self.feat_sim_embed = nn.Embedding(num_bins, spatial_dim)
-
-#         # 特征投影
-#         self.feat_proj = nn.Sequential(
-#             nn.Linear(embed_dim, embed_dim),
-#             nn.LayerNorm(embed_dim),
-#             nn.ReLU()
-#         )
-
-#     def forward(self, queries):
-#         B, N, C = queries.shape
-
-#         # 1. 计算特征相似度
-#         q_i = self.feat_proj(queries).unsqueeze(2)  # [B, N, 1, C]
-#         q_j = self.feat_proj(queries).unsqueeze(1)  # [B, 1, N, C]
-
-#         # 计算cosine相似度
-#         cos_sim = F.cosine_similarity(q_i, q_j, dim=-1)  # [B, N, N]
-
-#         # 2. 离散化相似度 [B, N, N]
-#         sim_bins = (cos_sim * (self.num_bins-1)).long().clamp(0, self.num_bins-1)
-
-#         # 3. 获取相似度embedding
-#         sim_embed = self.feat_sim_embed(sim_bins)  # [B, N, N, spatial_dim]
-
-#         return sim_embed
-# END: dual layer box relation encoder
-# ====================================================================================
 
 
-# ====================================================================================
-# START(In Progress): decoder-hough-space-relation: (decoder hough space relation)
-# import torch
-# import torch.nn as nn
-# import math
+class RelationAwareAttention(nn.Module):
+    def __init__(
+        self,
+        embed_dim, # 总的嵌入维度 (head_dim * num_heads)
+        num_heads,
+        num_relation_heads,
+        dropout=0.1,
+        batch_first=True
+    ):
+        super().__init__()
+        assert num_heads > num_relation_heads, "num_heads must be greater than num_relation_heads"
+        assert num_relation_heads > 0, "num_relation_heads must be greater than 0"
 
-# class HoughSpatialNet(nn.Module):
-#     def __init__(self, input_dim, hough_dim, num_angle_bins=36):
-#         super().__init__()
-#         self.num_angle_bins = num_angle_bins
+        # 基本参数
+        self.embed_dim = embed_dim
+        self.num_normal_heads = num_heads - num_relation_heads
+        self.num_relation_heads = num_relation_heads
+        self.head_dim = embed_dim // num_heads
+        self.scaling = self.head_dim ** -0.5
 
-#         # 提取box特征的网络
-#         self.box_encoder = nn.Sequential(
-#             nn.Linear(input_dim, hough_dim),
-#             nn.LayerNorm(hough_dim),
-#             nn.ReLU()
-#         )
+        # 常规attention heads
+        if self.num_normal_heads > 0:
+            self.normal_attention = nn.MultiheadAttention(
+                embed_dim,
+                self.num_normal_heads,
+                dropout=dropout,
+                batch_first=batch_first
+            )
+        else:
+            self.normal_attention = None
 
-#         # Hough空间特征提取网络
-#         self.hough_encoder = nn.Sequential(
-#             # 输入: 角度bin特征 + 距离特征 + 相对位置特征
-#             nn.Linear(num_angle_bins + 3, hough_dim),
-#             nn.LayerNorm(hough_dim),
-#             nn.ReLU(),
-#             nn.Linear(hough_dim, hough_dim)
-#         )
+        # 为relation heads准备的Q、K、V投影矩阵
+        self.relation_q = nn.Linear(embed_dim, num_relation_heads * self.head_dim)
+        self.relation_k = nn.Linear(embed_dim, num_relation_heads * self.head_dim)
+        self.relation_v = nn.Linear(embed_dim, num_relation_heads * self.head_dim)
 
-#     def extract_hough_features(self, boxes_i, boxes_j):
-#         """提取Hough空间特征
-#         Args:
-#             boxes_i: [B, N, 4] 格式为 (cx, cy, w, h)
-#             boxes_j: [B, N, 4] 格式为 (cx, cy, w, h)
-#         """
-#         # 直接获取中心点
-#         centers_i = boxes_i[..., :2]  # [B, N, 2] (cx, cy)
-#         centers_j = boxes_j[..., :2]  # [B, N, 2] (cx, cy)
+        # 输出投影和归一化
+        self.dropout = nn.Dropout(dropout)
+        self.out_proj = nn.Linear(embed_dim, embed_dim)
+        self.norm = nn.LayerNorm(embed_dim)
 
-#         # 计算相对位置
-#         delta = centers_j.unsqueeze(1) - centers_i.unsqueeze(2)  # [B, N, N, 2]
+    def forward(
+        self,
+        query,                      # [batch_size, num_queries, embed_dim]
+        key,                        # [batch_size, num_queries, embed_dim]
+        value,                      # [batch_size, num_queries, embed_dim]
+        relation_weights,           # [batch_size, num_relation_heads, num_queries, num_queries]
+        attn_mask=None,            # [batch_size, num_queries, num_queries]
+        need_weights=False
+    ):
+        batch_size, num_queries = query.shape[:2]
 
-#         # 计算距离
-#         distances = torch.norm(delta, dim=-1, keepdim=True)  # [B, N, N, 1]
+        # 1. 常规attention分支
+        if self.num_normal_heads > 0:
+            normal_out = self.normal_attention(
+                query, key, value,
+                attn_mask=attn_mask,
+                need_weights=False
+            )[0]
+        else:
+            normal_out = None
 
-#         # 计算角度
-#         angles = torch.atan2(delta[..., 1], delta[..., 0])  # [B, N, N]
+        # 2. Relation Network分支
+        # [batch_size, num_relation_heads, num_queries, num_queries]
+        if relation_weights is not None:
+            # 计算Q、K、V投影
+            q = self.relation_q(query).view(batch_size, -1, self.num_relation_heads, self.head_dim)
+            k = self.relation_k(key).view(batch_size, -1, self.num_relation_heads, self.head_dim)
+            v = self.relation_v(value).view(batch_size, -1, self.num_relation_heads, self.head_dim)
 
-#         # 将角度转换为bin index
-#         angles = (angles + math.pi) * self.num_angle_bins / (2 * math.pi)
-#         angle_indices = angles.long() % self.num_angle_bins
+            # 调整维度顺序 [batch_size, num_relation_heads, num_queries, head_dim]
+            q = q.transpose(1, 2)
+            k = k.transpose(1, 2)
+            v = v.transpose(1, 2)
 
-#         # 生成角度的one-hot编码
-#         angle_features = torch.zeros(
-#             *angle_indices.shape, self.num_angle_bins,
-#             device=angle_indices.device
-#         )
-#         angle_features.scatter_(-1, angle_indices.unsqueeze(-1), 1)
+            # 计算attention scores
+            attn_weights = torch.matmul(q, k.transpose(-2, -1)) * self.scaling  # [B, H, N, N]
 
-#         # 计算相对scale (面积比)
-#         areas_i = boxes_i[..., 2] * boxes_i[..., 3]  # w * h
-#         areas_j = boxes_j[..., 2] * boxes_j[..., 3]  # w * h
-#         scale_ratio = torch.log(
-#             areas_j.unsqueeze(1) / areas_i.unsqueeze(2)
-#         ).unsqueeze(-1)  # [B, N, N, 1]
+            # 应用mask (如果有)
+            if attn_mask is not None:
+                # 扩展mask到正确的维度 [B, 1, N, N] -> [B, H, N, N]
+                attn_mask = attn_mask.unsqueeze(1).expand(-1, self.num_relation_heads, -1, -1)
+                attn_weights = attn_weights.masked_fill(attn_mask, float('-inf'))
+                relation_weights = relation_weights.masked_fill(attn_mask, 0)
 
-#         # 组合特征
-#         hough_features = torch.cat([
-#             angle_features,      # 角度bin特征
-#             distances,          # 距离特征
-#             scale_ratio,       # 相对scale特征
-#             delta.norm(dim=-1, keepdim=True)  # 相对位置范数
-#         ], dim=-1)
+            # 实现带关系权重的softmax
+            # 原始论文: w_ij = exp(w_G_ij * f_ij) / sum_k(exp(w_G_ik * f_ik))
+            # relation_weights已经是正确的维度 [B, H, N, N]
+            attn_weights = torch.exp(attn_weights) * relation_weights  # 直接相乘，不需要额外的维度调整
+            attn_weights = attn_weights / (attn_weights.sum(dim=-1, keepdim=True) + 1e-6)
+            attn_weights = self.dropout(attn_weights)
 
-#         return hough_features
+            # 计算输出
+            relation_out = torch.matmul(attn_weights, v)  # [B, H, N, d]
+            relation_out = relation_out.transpose(1, 2).contiguous()  # [B, N, H, d]
+            # [batch_size, num_queries, num_relation_heads * head_dim]
+            relation_out = relation_out.view(batch_size, -1, self.num_relation_heads * self.head_dim)
 
-#     def forward(self, ref_boxes):
-#         """
-#         Args:
-#             ref_boxes: [B, N, 4] tensor, 每个box格式为 (cx, cy, w, h)
-#         """
-#         B, N, _ = ref_boxes.size()
+        else:
+            relation_out = None
 
-#         # 提取box基础特征
-#         box_feats = self.box_encoder(ref_boxes)
+        if normal_out is None:
+            output = relation_out
+        elif relation_out is None:
+            output = normal_out
+        else:
+            # [B, N, (num_normal_heads + num_relation_heads) * head_dim]
+            # = [B, N, num_heads * head_dim]
+            # = [B, N, embed_dim]
+            output = torch.cat([normal_out, relation_out], dim=-1)
 
-#         # 提取Hough空间特征
-#         hough_feats = self.extract_hough_features(ref_boxes, ref_boxes)
-#         spatial_feats = self.hough_encoder(hough_feats)
+        output = self.out_proj(output) # [B, N, embed_dim] -> [B, N, embed_dim]
+        output = self.norm(output) # [B, N, embed_dim]
 
-#         return spatial_feats
-# # END: decoder-hough-space-relation: (decoder hough space relation)
-# ====================================================================================
+        return output, None
