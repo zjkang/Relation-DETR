@@ -171,7 +171,7 @@ class DINOTransformerDecoder(nn.Module):
         self.bbox_head = nn.ModuleList([copy.deepcopy(bbox_head) for _ in range(num_layers)])
         self.norm = nn.LayerNorm(self.embed_dim)
 
-        self.position_relation_embedding = PositionRelationEmbedding(16, self.num_heads)
+        # self.position_relation_embedding = PositionRelationEmbedding(16, self.num_heads)
         self.init_weights()
 
     def init_weights(self):
@@ -234,12 +234,12 @@ class DINOTransformerDecoder(nn.Module):
             if layer_idx == self.num_layers - 1:
                 break
 
-            # NOTE: Here we integrate position_relation_embedding into DINO
-            src_boxes = tgt_boxes if layer_idx >= 1 else reference_points
-            tgt_boxes = output_coord
-            pos_relation = self.position_relation_embedding(src_boxes, tgt_boxes).flatten(0, 1)
-            if attn_mask is not None:
-                pos_relation.masked_fill_(attn_mask, float("-inf"))
+            # # NOTE: Here we integrate position_relation_embedding into DINO
+            # src_boxes = tgt_boxes if layer_idx >= 1 else reference_points
+            # tgt_boxes = output_coord
+            # pos_relation = self.position_relation_embedding(src_boxes, tgt_boxes).flatten(0, 1)
+            # if attn_mask is not None:
+            #     pos_relation.masked_fill_(attn_mask, float("-inf"))
 
             # iterative bounding box refinement
             reference_points = inverse_sigmoid(reference_points.detach())
