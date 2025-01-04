@@ -121,7 +121,11 @@ class SetCriterion(nn.Module):
         losses = {}
         # get matching results for each image
         if not indices:
+            # gt_boxes: [(num_gt_boxes_i, 4)]
+            # gt_labels: [(num_gt_boxes_i)]
             gt_boxes, gt_labels = list(zip(*map(lambda x: (x["boxes"], x["labels"]), targets)))
+            # pred_boxes: (batch_size, num_queries, 4)
+            # pred_logits: (batch_size, num_queries, num_classes)
             pred_logits, pred_boxes = outputs["pred_logits"], outputs["pred_boxes"]
             indices = list(map(self.matcher, pred_boxes, pred_logits, gt_boxes, gt_labels))
         loss_class = self.loss_labels(outputs, targets, num_boxes, indices=indices)

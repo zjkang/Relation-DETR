@@ -13,7 +13,7 @@ from models.bricks.position_encoding import PositionEmbeddingSine
 from models.bricks.post_process import PostProcess
 from models.bricks.set_criterion import SetCriterion
 from models.detectors.dino import DINO
-from models.matcher.hungarian_matcher import HungarianMatcher
+from models.matcher.hungarian_matcher import HungarianMatcher, SpeaQHungarianMatcher
 from models.necks.channel_mapper import ChannelMapper
 
 # mostly changed parameters
@@ -70,7 +70,11 @@ transformer = DINOTransformer(
     two_stage_num_proposals=num_queries,
 )
 
-matcher = HungarianMatcher(cost_class=2, cost_bbox=5, cost_giou=2, focal_alpha=0.25, focal_gamma=2.0)
+num_groups: int = 5,
+num_mul_so_queries: int = 900, # multiple specialist queries
+# matcher = HungarianMatcher(cost_class=2, cost_bbox=5, cost_giou=2, focal_alpha=0.25, focal_gamma=2.0)
+matcher = SpeaQHungarianMatcher(cost_class=2, cost_bbox=5, cost_giou=2, focal_alpha=0.25, focal_gamma=2.0,
+                                num_groups=num_groups, num_classes=num_classes, num_mul_so_queries=num_queries)
 
 weight_dict = {"loss_class": 1, "loss_bbox": 5, "loss_giou": 2}
 weight_dict.update({"loss_class_dn": 1, "loss_bbox_dn": 5, "loss_giou_dn": 2})
