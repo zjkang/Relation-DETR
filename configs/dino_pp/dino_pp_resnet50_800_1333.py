@@ -70,8 +70,7 @@ transformer = DINOTransformer(
     two_stage_num_proposals=num_queries,
 )
 
-num_groups: int = 5,
-num_mul_so_queries: int = 900, # multiple specialist queries
+num_groups: int = 5
 # matcher = HungarianMatcher(cost_class=2, cost_bbox=5, cost_giou=2, focal_alpha=0.25, focal_gamma=2.0)
 matcher = SpeaQHungarianMatcher(cost_class=2, cost_bbox=5, cost_giou=2, focal_alpha=0.25, focal_gamma=2.0,
                                 num_groups=num_groups, num_classes=num_classes, num_mul_so_queries=num_queries)

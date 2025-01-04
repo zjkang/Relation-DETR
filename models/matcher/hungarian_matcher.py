@@ -310,6 +310,7 @@ class SpeaQHungarianMatcher(nn.Module):
         self.num_groups = num_groups
         self.num_classes = num_classes
         self.num_mul_so_queries = num_mul_so_queries
+        # there are only 80 classes in COCO but label id is from 1 to 90 some of them are not used
         self.class_freq = torch.tensor(list(sorted_dict.values()))
         self.class_order = torch.tensor(list(sorted_dict.keys()))
         # 2种分组:
@@ -319,6 +320,7 @@ class SpeaQHungarianMatcher(nn.Module):
         # 返回一个列表，包含每个组应该包含的关系数量。比如 [1, 2, 2] 表示第一组包含1个class，第二组包含2个class，第三组包含2个class
         self.size_of_groups = self.get_group_list_by_n_groups(self.num_groups)
         self.grouping()
+        print(f'query assignment: {self.freq_list}')
 
     def get_group_list_by_n_groups(self, n_groups):
         class_freq_np = self.class_freq.numpy()
@@ -349,8 +351,10 @@ class SpeaQHungarianMatcher(nn.Module):
             last_checked_index = current_idx
 
         # 确保最后一组至少有一个元素
-        last_group_size = max(1, self.num_classes - size_of_whole_groups)
+        last_group_size = max(1, len(self.class_freq) - size_of_whole_groups)
         total_list.append(last_group_size)
+
+        print(f'total_list: {total_list}, size_of_groups: {len(total_list)}, sum of total_list: {sum(total_list)}')
 
         return total_list
 
@@ -380,7 +384,7 @@ class SpeaQHungarianMatcher(nn.Module):
         for g, row in enumerate(self.class_rel_order):
             group_tensor[row] = g
         self.group_tensor = group_tensor # 存储每个class属于哪个组
-        self.freq_list = n_queries_per_group.cpu().numpy() # 存储每个组分 group_id -> num_queries
+        self.freq_list = torch.tensor(n_queries_per_group.cpu().numpy()) # 存储每个组分 group_id -> num_queries
         self.n_groups = len(self.freq_list) # 存储组的总数
 
 

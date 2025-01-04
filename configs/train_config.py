@@ -31,7 +31,8 @@ test_dataset = CocoDetection(
 )
 
 # model config to train
-model_path = "configs/relation_detr/relation_detr_resnet50_800_1333.py"
+# model_path = "configs/relation_detr/relation_detr_resnet50_800_1333.py"
+model_path = "configs/dino_pp/dino_pp_resnet50_800_1333.py"
 
 # specify a checkpoint folder to resume, or a pretrained ".pth" to finetune, for example:
 # checkpoints/relation_detr_resnet50_800_1333/train/2024-03-22-09_38_50
