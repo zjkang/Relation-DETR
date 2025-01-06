@@ -45,7 +45,8 @@ class HungarianMatcher(nn.Module):
         neg_cost_class = -(1 - self.focal_alpha) * out_prob**self.focal_gamma * (1 - out_prob + 1e-6).log()
         pos_cost_class = -self.focal_alpha * (1 - out_prob)**self.focal_gamma * (out_prob + 1e-6).log()
         cost_class = pos_cost_class[:, gt_labels] - neg_cost_class[:, gt_labels]
-
+        # focal loss: 容易样本（预测很准的），权重较小; 困难样本（预测不准的），权重较大
+        # cost_class: (num_queries, num_gt_boxes 预测越准确，代价越小
         return cost_class
 
     def calculate_bbox_cost(self, pred_boxes, gt_boxes, **kwargs):
@@ -61,8 +62,21 @@ class HungarianMatcher(nn.Module):
     @torch.no_grad()
     def calculate_cost(self, pred_boxes: Tensor, pred_logits: Tensor, gt_boxes: Tensor, gt_labels: Tensor):
         # Calculate class, bbox and giou cost
+        # 由于使用的是Focal Loss:
+        # - log(p)的范围是[0, ∞)
+        # - focal weight (1-p)^γ 的范围是[0, 1]
+        # - alpha的范围是[0, 1]，通常是0.25
+        # 实际范围大约在[0, 7]之间，但理论上没有上限
         cost_class = self.calculate_class_cost(pred_logits, gt_labels)
+        # 使用L1距离（曼哈顿距离）计算
+        # boxes是归一化的坐标(cx, cy, w, h)，范围都在[0, 1]
+        # 因此L1距离的范围是[0, 4]
+        # - 每个坐标差的最大值是1
+        # - 4个坐标，所以最大总和是4
         cost_bbox = self.calculate_bbox_cost(pred_boxes, gt_boxes)
+        # GIoU的范围是[-1, 1]
+        # 由于代码中使用的是-GIoU
+        # 所以cost_giou的范围是[-1, 1]
         cost_giou = self.calculate_giou_cost(pred_boxes, gt_boxes)
 
         # Final cost matrix
@@ -78,6 +92,8 @@ class HungarianMatcher(nn.Module):
         # single assignment
         if not self.mixed_match:
             indices = linear_sum_assignment(c.cpu())
+            # indices[0] = [1, 2]     # queries的索引
+            # indices[1] = [0, 1]     # gt_boxes的索引
             return torch.as_tensor(indices[0]), torch.as_tensor(indices[1])
 
         # mixed assignment, used in AlignDETR
@@ -464,3 +480,82 @@ class SpeaQHungarianMatcher(nn.Module):
         src_ind = torch.as_tensor(src_ind, dtype=torch.int64)[ind].view(-1)
         return src_ind, tgt_ind
 
+
+class StableHungarianMatcher(HungarianMatcher):
+    def __init__(
+        self,
+        cost_class: float = 1.0,
+        cost_bbox: float = 1.0,
+        cost_giou: float = 1.0,
+        focal_alpha: float = 0.25,
+        focal_gamma: float = 2.0,
+        stability_weight: float = 0.2,
+    ):
+        super().__init__(
+            cost_class=cost_class,
+            cost_bbox=cost_bbox,
+            cost_giou=cost_giou,
+            focal_alpha=focal_alpha,
+            focal_gamma=focal_gamma,
+        )
+        self.stability_weight = stability_weight
+        self.layer_matches = {}  # 存储每一层的匹配
+
+    def forward(self, pred_boxes, pred_logits, gt_boxes, gt_labels,
+                is_encoder=False, batch_idx=None, layer_idx=None):
+        # 使用父类的calculate_cost方法
+        C = self.calculate_cost(pred_logits, pred_boxes, gt_labels, gt_boxes)
+
+        if self.training and not is_encoder and batch_idx is not None:
+            if layer_idx is not None:  # 辅助层
+                # 获取下一层的匹配结果
+                next_layer_idx = layer_idx + 1
+                if batch_idx in self.layer_matches and next_layer_idx in self.layer_matches[batch_idx]:
+                    prev_matches = self.layer_matches[batch_idx][next_layer_idx]
+                    stability_cost = self.calculate_stability_cost(
+                        C.shape,
+                        prev_matches,
+                        C.device
+                    )
+                    C = C + self.stability_weight * stability_cost
+
+        indices = linear_sum_assignment(C.cpu())
+        indices = (
+            torch.as_tensor(indices[0], dtype=torch.int64),
+            torch.as_tensor(indices[1], dtype=torch.int64)
+        )
+
+        # 保存当前层的匹配结果
+        if self.training and not is_encoder and batch_idx is not None:
+            if batch_idx not in self.layer_matches:
+                self.layer_matches[batch_idx] = {}
+            current_layer_idx = layer_idx if layer_idx is not None else 5 # hardcode idx 5 表示最后一层
+            self.layer_matches[batch_idx][current_layer_idx] = indices
+
+        return indices
+
+    def calculate_stability_cost(self, shape, prev_matches, device):
+        num_queries, num_targets = shape
+        stability_cost = torch.ones((num_queries, num_targets), device=device)
+        prev_q, prev_t = prev_matches
+        stability_cost[prev_q, prev_t] = 0.0
+        return stability_cost
+
+# 5. 需要注意的点：
+# stability_weight的选择很重要
+# 太大：可能强制不合理的匹配
+# 太小：可能没有效果
+# 是否要在所有层间保持稳定性
+# 可能早期层允许更多变化
+# 后期层要求更稳定
+
+# 可能的变体
+# 动态调整稳定性权重
+# stability_weight = self.stability_weight * (1 - math.exp(-current_epoch/10))
+
+# # 基于匹配质量的稳定性权重
+# quality_based_weight = self.stability_weight * match_quality_score
+
+# # 渐进式稳定性
+# if current_epoch > stability_start_epoch:
+#     # 添加稳定性约束
