@@ -301,7 +301,22 @@ class StableSetCriterion(SetCriterion):
 
 
 
+class MixedSetCriterion(SetCriterion):
+    def forward(self, outputs, targets):
+        pass
+
+
+
 class HybridSetCriterion(SetCriterion):
+    # Hybrid（混合）主要体现在它结合了两种不同的思想
+    # 传统DETR的分类损失：
+    # 使用one-hot标签
+    # 基于匈牙利匹配的结果
+    # 使用focal loss处理类别不平衡
+    # 2. IoU-aware的分类损失（来自YOLO系列）：
+    # 将IoU信息融入分类分数
+    # 让分类分数同时反映定位质量
+    # 使用IoU score作为软标签
     def loss_labels(self, outputs, targets, num_boxes, indices, **kwargs):
         assert "pred_boxes" in outputs
         idx = self._get_src_permutation_idx(indices)
@@ -318,16 +333,35 @@ class HybridSetCriterion(SetCriterion):
         src_logits = outputs["pred_logits"]
 
         # construct onehot targets, shape: (batch_size, num_queries, num_classes)
+        # 收集所有匹配到的ground truth的类别标签
         target_classes_o = torch.cat([t["labels"][J] for t, (_, J) in zip(targets, indices)])
         target_classes = torch.full(
             src_logits.shape[:2], self.num_classes, dtype=torch.int64, device=src_logits.device
         )
+        # 在匹配位置填入真实类别标签
         target_classes[idx] = target_classes_o
+        # num_classes + 1 是因为包含背景类
+        # [..., :-1] 是去掉背景类
         target_classes_onehot = F.one_hot(target_classes, self.num_classes + 1)[..., :-1]
 
         # construct iou_score, shape: (batch_size, num_queries)
         target_score = torch.zeros_like(target_classes, dtype=iou_score.dtype)
         target_score[idx] = iou_score
+
+        # 假设：
+        # batch_size = 2
+        # num_queries = 4
+        # num_classes = 3
+        # # target_classes 可能是：
+        # [
+        #     [3, 1, 3, 3],  # 第一张图：第2个query匹配到类别1，其他是背景(3)
+        #     [0, 3, 2, 3]   # 第二张图：第1个query匹配到类别0，第3个匹配到类别2
+        # ]
+        # # target_classes_onehot 会变成：
+        # [
+        #     [[0,0,0], [0,1,0], [0,0,0], [0,0,0]],  # 第一张图
+        #     [[1,0,0], [0,0,0], [0,0,1], [0,0,0]]   # 第二张图
+        # ]
 
         loss_class = (
             vari_sigmoid_focal_loss(

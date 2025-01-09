@@ -97,14 +97,29 @@ class HungarianMatcher(nn.Module):
             return torch.as_tensor(indices[0]), torch.as_tensor(indices[1])
 
         # mixed assignment, used in AlignDETR
-        gt_size = c.size(-1)
+        gt_size = c.size(-1) # ground truth的数量
         num_queries = len(c)
+        # 每个target最多被匹配的次数，不超过queries数量的一半除以target数量
         gt_copy = min(int(num_queries * 0.5 / gt_size), gt_copy) if gt_size > 0 else gt_copy
+        # 水平方向重复gt_copy次
+        # 例如，原cost矩阵：
+        # [[0.1, 0.2],
+        #  [0.3, 0.4],
+        #  [0.5, 0.6]]
+        # gt_copy=2时，扩展后：
+        # [[0.1, 0.2, 0.1, 0.2],
+        #  [0.3, 0.4, 0.3, 0.4],
+        #  [0.5, 0.6, 0.5, 0.6]]
         src_ind, tgt_ind = linear_sum_assignment(c.cpu().repeat(1, gt_copy))
+        # 还原真实的target索引
         tgt_ind = tgt_ind % gt_size
+        # 对target索引排序，并相应调整source索引
         tgt_ind, ind = torch.as_tensor(tgt_ind, dtype=torch.int64).sort()
         src_ind = torch.as_tensor(src_ind, dtype=torch.int64)[ind].view(-1)
         return src_ind, tgt_ind
+
+
+
 
 
 # +----------------+------+-------+-------+--------+-------+
