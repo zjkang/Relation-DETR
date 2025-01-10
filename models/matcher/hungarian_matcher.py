@@ -1,7 +1,7 @@
 import torch
 from scipy.optimize import linear_sum_assignment
 from torch import Tensor, nn
-from torchvision.ops.boxes import _box_cxcywh_to_xyxy, generalized_box_iou
+from torchvision.ops.boxes import _box_cxcywh_to_xyxy, generalized_box_iou, box_iou
 
 
 class HungarianMatcher(nn.Module):
@@ -119,6 +119,23 @@ class HungarianMatcher(nn.Module):
         return src_ind, tgt_ind
 
 
+
+# class HybridStableHungarianMatcher(HungarianMatcher):
+#     def calculate_class_cost(self, pred_logits, gt_labels, pred_boxes=None, gt_boxes=None):
+#         out_prob = pred_logits.sigmoid()
+
+#         # 1. 计算IoU
+#         ious = box_iou(_box_cxcywh_to_xyxy(pred_boxes), _box_cxcywh_to_xyxy(gt_boxes))
+
+#         # 2. 计算分类cost时考虑IoU
+#         neg_cost_class = -(1 - self.focal_alpha) * out_prob**self.focal_gamma * (1 - out_prob + 1e-6).log()
+#         pos_cost_class = -self.focal_alpha * (1 - out_prob)**self.focal_gamma * (out_prob + 1e-6).log()
+#         base_cost_class = pos_cost_class[:, gt_labels] - neg_cost_class[:, gt_labels]
+
+#         # # 使用IoU调整分类cost
+#         # cost_class = base_cost_class * (1 + ious)
+
+#         return cost_class
 
 
 
@@ -314,247 +331,247 @@ id_to_gt = {
 # Sort dictionary by values in descending order
 sorted_dict = dict(sorted(id_to_gt.items(), key=lambda x: x[1], reverse=True))
 
-class SpeaQHungarianMatcher(nn.Module):
-    def __init__(
-        self,
-        cost_class: float = 1,
-        cost_bbox: float = 1,
-        cost_giou: float = 1,
-        focal_alpha: float = 0.25,
-        focal_gamma: float = 2.0,
-        mixed_match: bool = False,
-        num_groups: int = 5,
-        num_classes: int = 91,
-        num_mul_so_queries: int = 900, # multiple specialist queries
-    ):
-        super().__init__()
+# class SpeaQHungarianMatcher(nn.Module):
+#     def __init__(
+#         self,
+#         cost_class: float = 1,
+#         cost_bbox: float = 1,
+#         cost_giou: float = 1,
+#         focal_alpha: float = 0.25,
+#         focal_gamma: float = 2.0,
+#         mixed_match: bool = False,
+#         num_groups: int = 5,
+#         num_classes: int = 91,
+#         num_mul_so_queries: int = 900, # multiple specialist queries
+#     ):
+#         super().__init__()
 
-        self.cost_class = cost_class
-        self.cost_bbox = cost_bbox
-        self.cost_giou = cost_giou
-        assert cost_class != 0 or cost_bbox != 0 or cost_giou != 0, "all costs cant be 0"
+#         self.cost_class = cost_class
+#         self.cost_bbox = cost_bbox
+#         self.cost_giou = cost_giou
+#         assert cost_class != 0 or cost_bbox != 0 or cost_giou != 0, "all costs cant be 0"
 
-        self.focal_alpha = focal_alpha
-        self.focal_gamma = focal_gamma
-        self.mixed_match = mixed_match
+#         self.focal_alpha = focal_alpha
+#         self.focal_gamma = focal_gamma
+#         self.mixed_match = mixed_match
 
-        self.num_groups = num_groups
-        self.num_classes = num_classes
-        self.num_mul_so_queries = num_mul_so_queries
-        # there are only 80 classes in COCO but label id is from 1 to 90 some of them are not used
-        self.class_freq = torch.tensor(list(sorted_dict.values()))
-        self.class_order = torch.tensor(list(sorted_dict.keys()))
-        # 2种分组:
-        # 1. 将classes按照频率进行分组
-        # 2. 将queries按照相应比例进行分组
-        # assume num_groups = 3, num_classes = 5
-        # 返回一个列表，包含每个组应该包含的关系数量。比如 [1, 2, 2] 表示第一组包含1个class，第二组包含2个class，第三组包含2个class
-        self.size_of_groups = self.get_group_list_by_n_groups(self.num_groups)
-        self.grouping()
-        print(f'query assignment: {self.freq_list}')
+#         self.num_groups = num_groups
+#         self.num_classes = num_classes
+#         self.num_mul_so_queries = num_mul_so_queries
+#         # there are only 80 classes in COCO but label id is from 1 to 90 some of them are not used
+#         self.class_freq = torch.tensor(list(sorted_dict.values()))
+#         self.class_order = torch.tensor(list(sorted_dict.keys()))
+#         # 2种分组:
+#         # 1. 将classes按照频率进行分组
+#         # 2. 将queries按照相应比例进行分组
+#         # assume num_groups = 3, num_classes = 5
+#         # 返回一个列表，包含每个组应该包含的关系数量。比如 [1, 2, 2] 表示第一组包含1个class，第二组包含2个class，第三组包含2个class
+#         self.size_of_groups = self.get_group_list_by_n_groups(self.num_groups)
+#         self.grouping()
+#         print(f'query assignment: {self.freq_list}')
 
-    def get_group_list_by_n_groups(self, n_groups):
-        class_freq_np = self.class_freq.numpy()
-        total_list = []
-        last_checked_index = 0
-        current_idx = 0
-        size_of_whole_groups = 0
+#     def get_group_list_by_n_groups(self, n_groups):
+#         class_freq_np = self.class_freq.numpy()
+#         total_list = []
+#         last_checked_index = 0
+#         current_idx = 0
+#         size_of_whole_groups = 0
 
-        for i in range(n_groups - 1):
-            sum_of_this_group = 0
-            size_of_this_group = 0
-            remaining_list = class_freq_np[last_checked_index:]
-            remaining_half_cnt = remaining_list.sum() // 2
+#         for i in range(n_groups - 1):
+#             sum_of_this_group = 0
+#             size_of_this_group = 0
+#             remaining_list = class_freq_np[last_checked_index:]
+#             remaining_half_cnt = remaining_list.sum() // 2
 
-            while (current_idx < len(class_freq_np) and
-                sum_of_this_group + class_freq_np[current_idx] < remaining_half_cnt):
-                sum_of_this_group += class_freq_np[current_idx]
-                size_of_this_group += 1
-                size_of_whole_groups += 1
-                current_idx += 1
+#             while (current_idx < len(class_freq_np) and
+#                 sum_of_this_group + class_freq_np[current_idx] < remaining_half_cnt):
+#                 sum_of_this_group += class_freq_np[current_idx]
+#                 size_of_this_group += 1
+#                 size_of_whole_groups += 1
+#                 current_idx += 1
 
-            if size_of_this_group == 0:  # 防止出现空组
-                size_of_this_group = 1
-                size_of_whole_groups += 1
-                current_idx += 1
+#             if size_of_this_group == 0:  # 防止出现空组
+#                 size_of_this_group = 1
+#                 size_of_whole_groups += 1
+#                 current_idx += 1
 
-            total_list.append(size_of_this_group)
-            last_checked_index = current_idx
+#             total_list.append(size_of_this_group)
+#             last_checked_index = current_idx
 
-        # 确保最后一组至少有一个元素
-        last_group_size = max(1, len(self.class_freq) - size_of_whole_groups)
-        total_list.append(last_group_size)
+#         # 确保最后一组至少有一个元素
+#         last_group_size = max(1, len(self.class_freq) - size_of_whole_groups)
+#         total_list.append(last_group_size)
 
-        print(f'total_list: {total_list}, size_of_groups: {len(total_list)}, sum of total_list: {sum(total_list)}')
+#         print(f'total_list: {total_list}, size_of_groups: {len(total_list)}, sum of total_list: {sum(total_list)}')
 
-        return total_list
+#         return total_list
 
-    def fill_list(self, num, n):
-        quotient, remainder = divmod(num, n)
-        lst = [quotient] * n
-        for i in range(remainder):
-            lst[-1 * (i + 1)] += 1
-        return torch.tensor(lst)
+#     def fill_list(self, num, n):
+#         quotient, remainder = divmod(num, n)
+#         lst = [quotient] * n
+#         for i in range(remainder):
+#             lst[-1 * (i + 1)] += 1
+#         return torch.tensor(lst)
 
-    def grouping(self):
-        device_group = 'cuda'
-        group_tensor = -torch.ones(self.num_classes, device=device_group)
-        # 计算每个组的class频率总和
-        sum_of_each_groups = torch.as_tensor(
-            [x.sum().item() for x in torch.split(self.class_freq, self.size_of_groups)], device=device_group)
-        # 根据频率比例分配查询数量
-        n_queries_per_group = (sum_of_each_groups * self.num_mul_so_queries / sum_of_each_groups.sum()).int()
-        # 处理舍入误差，确保查询总数正确
-        n_queries_per_group += self.fill_list((self.num_mul_so_queries - n_queries_per_group.sum()).item(), len(n_queries_per_group)).to(device=device_group)
-        self.n_queries_per_group = n_queries_per_group.long()
-        assert self.num_mul_so_queries == n_queries_per_group.sum()
+#     def grouping(self):
+#         device_group = 'cuda'
+#         group_tensor = -torch.ones(self.num_classes, device=device_group)
+#         # 计算每个组的class频率总和
+#         sum_of_each_groups = torch.as_tensor(
+#             [x.sum().item() for x in torch.split(self.class_freq, self.size_of_groups)], device=device_group)
+#         # 根据频率比例分配查询数量
+#         n_queries_per_group = (sum_of_each_groups * self.num_mul_so_queries / sum_of_each_groups.sum()).int()
+#         # 处理舍入误差，确保查询总数正确
+#         n_queries_per_group += self.fill_list((self.num_mul_so_queries - n_queries_per_group.sum()).item(), len(n_queries_per_group)).to(device=device_group)
+#         self.n_queries_per_group = n_queries_per_group.long()
+#         assert self.num_mul_so_queries == n_queries_per_group.sum()
 
-        # 将class按照size_of_groups分割
-        self.class_rel_order = torch.split(self.class_order, self.size_of_groups)
-        # 为每个class分配组ID class_id -> group_id
-        for g, row in enumerate(self.class_rel_order):
-            group_tensor[row] = g
-        self.group_tensor = group_tensor # 存储每个class属于哪个组
-        self.freq_list = torch.tensor(n_queries_per_group.cpu().numpy()) # 存储每个组分 group_id -> num_queries
-        self.n_groups = len(self.freq_list) # 存储组的总数
-
-
-    def calculate_class_cost(self, pred_logits, gt_labels, **kwargs):
-        out_prob = pred_logits.sigmoid()
-
-        # Compute the classification cost.
-        neg_cost_class = -(1 - self.focal_alpha) * out_prob**self.focal_gamma * (1 - out_prob + 1e-6).log()
-        pos_cost_class = -self.focal_alpha * (1 - out_prob)**self.focal_gamma * (out_prob + 1e-6).log()
-        cost_class = pos_cost_class[:, gt_labels] - neg_cost_class[:, gt_labels]
-
-        return cost_class
-
-    def calculate_bbox_cost(self, pred_boxes, gt_boxes, **kwargs):
-        # Compute the L1 cost between boxes
-        cost_bbox = torch.cdist(pred_boxes, gt_boxes, p=1)
-        return cost_bbox
-
-    def calculate_giou_cost(self, pred_boxes, gt_boxes, **kwargs):
-        # Compute the giou cost betwen boxes
-        cost_giou = -generalized_box_iou(_box_cxcywh_to_xyxy(pred_boxes), _box_cxcywh_to_xyxy(gt_boxes))
-        return cost_giou
-
-    @torch.no_grad()
-    def calculate_cost(self, pred_boxes: Tensor, pred_logits: Tensor, gt_boxes: Tensor, gt_labels: Tensor):
-        # Calculate class, bbox and giou cost
-        cost_class = self.calculate_class_cost(pred_logits, gt_labels)
-        cost_bbox = self.calculate_bbox_cost(pred_boxes, gt_boxes)
-        cost_giou = self.calculate_giou_cost(pred_boxes, gt_boxes)
-
-        # Final cost matrix
-        c = self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_giou * cost_giou
-
-        # 获取每个gt_label对应的组ID
-        gt_groups = self.group_tensor[gt_labels].long()  # [num_gt_boxes]
-
-        # 计算每个组的queries的起始索引
-        start_indices = torch.zeros_like(self.freq_list, device=c.device)
-        start_indices[1:] = torch.cumsum(torch.tensor(self.freq_list[:-1], device=c.device), dim=0)
-
-        # 创建一个mask，初始化为False (或者1e6的cost)
-        mask = torch.ones_like(c) * 1e6
-        # 对每个gt box
-        for gt_idx, group_id in enumerate(gt_groups):
-            # 获取该组的queries的起始和结束索引
-            start_idx = start_indices[group_id]
-            end_idx = start_idx + self.freq_list[group_id]
-            # 将对应范围内的cost保持原值，其他设为一个大数
-            mask[start_idx:end_idx, gt_idx] = 0
-
-        # 应用mask torch.where(condition, x, y)
-        c = torch.where(mask == 0, c, mask)
-        # TODO: 将cost矩阵按照类的group进行specialization
-        return c
-
-    @torch.no_grad()
-    def forward(
-        self, pred_boxes: Tensor, pred_logits: Tensor, gt_boxes: Tensor, gt_labels: Tensor, gt_copy: int = 1
-    ):
-        # c: (num_queries, num_gt_boxes)
-        c = self.calculate_cost(pred_boxes, pred_logits, gt_boxes, gt_labels)
-
-        # c = c.view(self.num_groups, -1)
-
-        # single assignment
-        if not self.mixed_match:
-            indices = linear_sum_assignment(c.cpu())
-            return torch.as_tensor(indices[0]), torch.as_tensor(indices[1])
-
-        # mixed assignment, used in AlignDETR
-        gt_size = c.size(-1)
-        num_queries = len(c)
-        gt_copy = min(int(num_queries * 0.5 / gt_size), gt_copy) if gt_size > 0 else gt_copy
-        src_ind, tgt_ind = linear_sum_assignment(c.cpu().repeat(1, gt_copy))
-        tgt_ind = tgt_ind % gt_size
-        tgt_ind, ind = torch.as_tensor(tgt_ind, dtype=torch.int64).sort()
-        src_ind = torch.as_tensor(src_ind, dtype=torch.int64)[ind].view(-1)
-        return src_ind, tgt_ind
+#         # 将class按照size_of_groups分割
+#         self.class_rel_order = torch.split(self.class_order, self.size_of_groups)
+#         # 为每个class分配组ID class_id -> group_id
+#         for g, row in enumerate(self.class_rel_order):
+#             group_tensor[row] = g
+#         self.group_tensor = group_tensor # 存储每个class属于哪个组
+#         self.freq_list = torch.tensor(n_queries_per_group.cpu().numpy()) # 存储每个组分 group_id -> num_queries
+#         self.n_groups = len(self.freq_list) # 存储组的总数
 
 
-class StableHungarianMatcher(HungarianMatcher):
-    def __init__(
-        self,
-        cost_class: float = 1.0,
-        cost_bbox: float = 1.0,
-        cost_giou: float = 1.0,
-        focal_alpha: float = 0.25,
-        focal_gamma: float = 2.0,
-        stability_weight: float = 0.2,
-    ):
-        super().__init__(
-            cost_class=cost_class,
-            cost_bbox=cost_bbox,
-            cost_giou=cost_giou,
-            focal_alpha=focal_alpha,
-            focal_gamma=focal_gamma,
-        )
-        self.stability_weight = stability_weight
-        self.layer_matches = {}  # 存储每一层的匹配
+#     def calculate_class_cost(self, pred_logits, gt_labels, **kwargs):
+#         out_prob = pred_logits.sigmoid()
 
-    def forward(self, pred_boxes, pred_logits, gt_boxes, gt_labels,
-                is_encoder=False, batch_idx=None, layer_idx=None):
-        # 使用父类的calculate_cost方法
-        C = self.calculate_cost(pred_logits, pred_boxes, gt_labels, gt_boxes)
+#         # Compute the classification cost.
+#         neg_cost_class = -(1 - self.focal_alpha) * out_prob**self.focal_gamma * (1 - out_prob + 1e-6).log()
+#         pos_cost_class = -self.focal_alpha * (1 - out_prob)**self.focal_gamma * (out_prob + 1e-6).log()
+#         cost_class = pos_cost_class[:, gt_labels] - neg_cost_class[:, gt_labels]
 
-        if self.training and not is_encoder and batch_idx is not None:
-            if layer_idx is not None:  # 辅助层
-                # 获取下一层的匹配结果
-                next_layer_idx = layer_idx + 1
-                if batch_idx in self.layer_matches and next_layer_idx in self.layer_matches[batch_idx]:
-                    prev_matches = self.layer_matches[batch_idx][next_layer_idx]
-                    stability_cost = self.calculate_stability_cost(
-                        C.shape,
-                        prev_matches,
-                        C.device
-                    )
-                    C = C + self.stability_weight * stability_cost
+#         return cost_class
 
-        indices = linear_sum_assignment(C.cpu())
-        indices = (
-            torch.as_tensor(indices[0], dtype=torch.int64),
-            torch.as_tensor(indices[1], dtype=torch.int64)
-        )
+#     def calculate_bbox_cost(self, pred_boxes, gt_boxes, **kwargs):
+#         # Compute the L1 cost between boxes
+#         cost_bbox = torch.cdist(pred_boxes, gt_boxes, p=1)
+#         return cost_bbox
 
-        # 保存当前层的匹配结果
-        if self.training and not is_encoder and batch_idx is not None:
-            if batch_idx not in self.layer_matches:
-                self.layer_matches[batch_idx] = {}
-            current_layer_idx = layer_idx if layer_idx is not None else 5 # hardcode idx 5 表示最后一层
-            self.layer_matches[batch_idx][current_layer_idx] = indices
+#     def calculate_giou_cost(self, pred_boxes, gt_boxes, **kwargs):
+#         # Compute the giou cost betwen boxes
+#         cost_giou = -generalized_box_iou(_box_cxcywh_to_xyxy(pred_boxes), _box_cxcywh_to_xyxy(gt_boxes))
+#         return cost_giou
 
-        return indices
+#     @torch.no_grad()
+#     def calculate_cost(self, pred_boxes: Tensor, pred_logits: Tensor, gt_boxes: Tensor, gt_labels: Tensor):
+#         # Calculate class, bbox and giou cost
+#         cost_class = self.calculate_class_cost(pred_logits, gt_labels)
+#         cost_bbox = self.calculate_bbox_cost(pred_boxes, gt_boxes)
+#         cost_giou = self.calculate_giou_cost(pred_boxes, gt_boxes)
 
-    def calculate_stability_cost(self, shape, prev_matches, device):
-        num_queries, num_targets = shape
-        stability_cost = torch.ones((num_queries, num_targets), device=device)
-        prev_q, prev_t = prev_matches
-        stability_cost[prev_q, prev_t] = 0.0
-        return stability_cost
+#         # Final cost matrix
+#         c = self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_giou * cost_giou
+
+#         # 获取每个gt_label对应的组ID
+#         gt_groups = self.group_tensor[gt_labels].long()  # [num_gt_boxes]
+
+#         # 计算每个组的queries的起始索引
+#         start_indices = torch.zeros_like(self.freq_list, device=c.device)
+#         start_indices[1:] = torch.cumsum(torch.tensor(self.freq_list[:-1], device=c.device), dim=0)
+
+#         # 创建一个mask，初始化为False (或者1e6的cost)
+#         mask = torch.ones_like(c) * 1e6
+#         # 对每个gt box
+#         for gt_idx, group_id in enumerate(gt_groups):
+#             # 获取该组的queries的起始和结束索引
+#             start_idx = start_indices[group_id]
+#             end_idx = start_idx + self.freq_list[group_id]
+#             # 将对应范围内的cost保持原值，其他设为一个大数
+#             mask[start_idx:end_idx, gt_idx] = 0
+
+#         # 应用mask torch.where(condition, x, y)
+#         c = torch.where(mask == 0, c, mask)
+#         # TODO: 将cost矩阵按照类的group进行specialization
+#         return c
+
+#     @torch.no_grad()
+#     def forward(
+#         self, pred_boxes: Tensor, pred_logits: Tensor, gt_boxes: Tensor, gt_labels: Tensor, gt_copy: int = 1
+#     ):
+#         # c: (num_queries, num_gt_boxes)
+#         c = self.calculate_cost(pred_boxes, pred_logits, gt_boxes, gt_labels)
+
+#         # c = c.view(self.num_groups, -1)
+
+#         # single assignment
+#         if not self.mixed_match:
+#             indices = linear_sum_assignment(c.cpu())
+#             return torch.as_tensor(indices[0]), torch.as_tensor(indices[1])
+
+#         # mixed assignment, used in AlignDETR
+#         gt_size = c.size(-1)
+#         num_queries = len(c)
+#         gt_copy = min(int(num_queries * 0.5 / gt_size), gt_copy) if gt_size > 0 else gt_copy
+#         src_ind, tgt_ind = linear_sum_assignment(c.cpu().repeat(1, gt_copy))
+#         tgt_ind = tgt_ind % gt_size
+#         tgt_ind, ind = torch.as_tensor(tgt_ind, dtype=torch.int64).sort()
+#         src_ind = torch.as_tensor(src_ind, dtype=torch.int64)[ind].view(-1)
+#         return src_ind, tgt_ind
+
+
+# class StableHungarianMatcher(HungarianMatcher):
+#     def __init__(
+#         self,
+#         cost_class: float = 1.0,
+#         cost_bbox: float = 1.0,
+#         cost_giou: float = 1.0,
+#         focal_alpha: float = 0.25,
+#         focal_gamma: float = 2.0,
+#         stability_weight: float = 0.2,
+#     ):
+#         super().__init__(
+#             cost_class=cost_class,
+#             cost_bbox=cost_bbox,
+#             cost_giou=cost_giou,
+#             focal_alpha=focal_alpha,
+#             focal_gamma=focal_gamma,
+#         )
+#         self.stability_weight = stability_weight
+#         self.layer_matches = {}  # 存储每一层的匹配
+
+#     def forward(self, pred_boxes, pred_logits, gt_boxes, gt_labels,
+#                 is_encoder=False, batch_idx=None, layer_idx=None):
+#         # 使用父类的calculate_cost方法
+#         C = self.calculate_cost(pred_logits, pred_boxes, gt_labels, gt_boxes)
+
+#         if self.training and not is_encoder and batch_idx is not None:
+#             if layer_idx is not None:  # 辅助层
+#                 # 获取下一层的匹配结果
+#                 next_layer_idx = layer_idx + 1
+#                 if batch_idx in self.layer_matches and next_layer_idx in self.layer_matches[batch_idx]:
+#                     prev_matches = self.layer_matches[batch_idx][next_layer_idx]
+#                     stability_cost = self.calculate_stability_cost(
+#                         C.shape,
+#                         prev_matches,
+#                         C.device
+#                     )
+#                     C = C + self.stability_weight * stability_cost
+
+#         indices = linear_sum_assignment(C.cpu())
+#         indices = (
+#             torch.as_tensor(indices[0], dtype=torch.int64),
+#             torch.as_tensor(indices[1], dtype=torch.int64)
+#         )
+
+#         # 保存当前层的匹配结果
+#         if self.training and not is_encoder and batch_idx is not None:
+#             if batch_idx not in self.layer_matches:
+#                 self.layer_matches[batch_idx] = {}
+#             current_layer_idx = layer_idx if layer_idx is not None else 5 # hardcode idx 5 表示最后一层
+#             self.layer_matches[batch_idx][current_layer_idx] = indices
+
+#         return indices
+
+#     def calculate_stability_cost(self, shape, prev_matches, device):
+#         num_queries, num_targets = shape
+#         stability_cost = torch.ones((num_queries, num_targets), device=device)
+#         prev_q, prev_t = prev_matches
+#         stability_cost[prev_q, prev_t] = 0.0
+#         return stability_cost
 
 # 5. 需要注意的点：
 # stability_weight的选择很重要

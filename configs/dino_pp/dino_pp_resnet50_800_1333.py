@@ -11,14 +11,14 @@ from models.bricks.dino_transformer import (
 )
 from models.bricks.position_encoding import PositionEmbeddingSine
 from models.bricks.post_process import PostProcess
-from models.bricks.set_criterion import SetCriterion, StableSetCriterion
+from models.bricks.set_criterion import SetCriterion, StableSetCriterion, StableHybridSetCriterion
 from models.detectors.dino import DINO
 from models.matcher.hungarian_matcher import HungarianMatcher, SpeaQHungarianMatcher, StableHungarianMatcher
 from models.necks.channel_mapper import ChannelMapper
 
 # mostly changed parameters
 embed_dim = 256
-num_classes = 91
+num_classes = 91 # 90+1(background)
 num_queries = 900
 num_feature_levels = 4
 transformer_enc_layers = 6
@@ -71,9 +71,10 @@ transformer = DINOTransformer(
 )
 
 # num_groups: int = 5
-# matcher = HungarianMatcher(cost_class=2, cost_bbox=5, cost_giou=2, focal_alpha=0.25, focal_gamma=2.0)
-matcher = StableHungarianMatcher(
-    cost_class=2, cost_bbox=5, cost_giou=2, focal_alpha=0.25, focal_gamma=2.0, stability_weight=0.2)
+matcher = HungarianMatcher(cost_class=2, cost_bbox=5, cost_giou=2,
+                           focal_alpha=0.25, focal_gamma=2.0, mixed_match=True)
+# matcher = StableHungarianMatcher(
+#     cost_class=2, cost_bbox=5, cost_giou=2, focal_alpha=0.25, focal_gamma=2.0, stability_weight=0.2)
 
 weight_dict = {"loss_class": 1, "loss_bbox": 5, "loss_giou": 2}
 weight_dict.update({"loss_class_dn": 1, "loss_bbox_dn": 5, "loss_giou_dn": 2})
@@ -85,7 +86,9 @@ weight_dict.update({
 weight_dict.update({"loss_class_enc": 1, "loss_bbox_enc": 5, "loss_giou_enc": 2})
 
 # criterion = SetCriterion(num_classes, matcher=matcher, weight_dict=weight_dict, alpha=0.25, gamma=2.0)
-criterion = StableSetCriterion(num_classes, matcher=matcher, weight_dict=weight_dict, alpha=0.25, gamma=2.0)
+# criterion = StableSetCriterion(num_classes, matcher=matcher, weight_dict=weight_dict, alpha=0.25, gamma=2.0)
+criterion = StableHybridSetCriterion(
+    num_classes, matcher=matcher, weight_dict=weight_dict, alpha=0.25, gamma=2.0)
 postprocessor = PostProcess(select_box_nums_for_evaluation=300)
 
 # combine above components to instantiate the model
