@@ -406,14 +406,14 @@ class StableHybridSetCriterion(SetCriterion):
             for k, v in outputs.items()
             if k != "aux_outputs" and k != "enc_outputs"
         }
-        losses.update(self.calculate_loss(matching_outputs, targets, num_boxes, self.matching_copies[-1]))
+        losses.update(self.calculate_loss(matching_outputs, targets, num_boxes, gt_copy=self.matching_copies[-1]))
 
         # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.
         if "aux_outputs" in outputs:
             # 计算辅助损失 (来自decoder的每一层)
             for i, aux_outputs in enumerate(outputs["aux_outputs"]):
                 # get matching results for each image
-                losses_aux = self.calculate_loss(aux_outputs, targets, num_boxes, self.matching_copies[i+1])
+                losses_aux = self.calculate_loss(aux_outputs, targets, num_boxes, gt_copy=self.matching_copies[i+1])
                 losses.update({k + f"_{i}": v for k, v in losses_aux.items()})
 
         # 计算编码器输出的损失 (如果使用两阶段检测):
@@ -431,7 +431,7 @@ class StableHybridSetCriterion(SetCriterion):
             if self.two_stage_binary_cls:
                 for bt in bin_targets:
                     bt["labels"] = torch.zeros_like(bt["labels"])
-            losses_enc = self.calculate_loss(enc_outputs, bin_targets, num_boxes, self.matching_copies[0])
+            losses_enc = self.calculate_loss(enc_outputs, bin_targets, num_boxes, gt_copy=self.matching_copies[0])
             losses.update({k + f"_enc": v for k, v in losses_enc.items()})
 
         return losses
@@ -461,7 +461,11 @@ class StableHybridSetCriterion(SetCriterion):
             #         tensor([0, 1])            # 对应的gt框的索引 (总共2个gt)
             #     )
             # ]
-            indices = list(map(self.matcher, pred_boxes, pred_logits, gt_boxes, gt_labels, gt_copy))
+            # indices = list(map(self.matcher, pred_boxes, pred_logits, gt_boxes, gt_labels, gt_copy))
+            indices = list(map(
+                lambda pb, pl, gb, gl: self.matcher(pb, pl, gb, gl, gt_copy=gt_copy),
+                pred_boxes, pred_logits, gt_boxes, gt_labels
+            ))
         loss_class = self.loss_labels(outputs, targets, num_boxes, indices=indices)
         loss_boxes = self.loss_boxes(outputs, targets, num_boxes, indices=indices)
         losses.update(loss_class)

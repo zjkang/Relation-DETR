@@ -11,9 +11,9 @@ from models.bricks.dino_transformer import (
 )
 from models.bricks.position_encoding import PositionEmbeddingSine
 from models.bricks.post_process import PostProcess
-from models.bricks.set_criterion import SetCriterion, StableSetCriterion, StableHybridSetCriterion
+from models.bricks.set_criterion import SetCriterion, StableHybridSetCriterion
 from models.detectors.dino import DINO
-from models.matcher.hungarian_matcher import HungarianMatcher, SpeaQHungarianMatcher, StableHungarianMatcher
+from models.matcher.hungarian_matcher import HungarianMatcher
 from models.necks.channel_mapper import ChannelMapper
 
 # mostly changed parameters
