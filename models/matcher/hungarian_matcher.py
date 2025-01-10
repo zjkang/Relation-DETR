@@ -533,10 +533,10 @@ sorted_dict = dict(sorted(id_to_gt.items(), key=lambda x: x[1], reverse=True))
 #         self.stability_weight = stability_weight
 #         self.layer_matches = {}  # 存储每一层的匹配
 
-    def forward(self, pred_boxes, pred_logits, gt_boxes, gt_labels,
-                is_encoder=False, batch_idx=None, layer_idx=None):
-        # 使用父类的calculate_cost方法
-        C = self.calculate_cost(pred_logits, pred_boxes, gt_labels, gt_boxes)
+    # def forward(self, pred_boxes, pred_logits, gt_boxes, gt_labels,
+    #             is_encoder=False, batch_idx=None, layer_idx=None):
+    #     # 使用父类的calculate_cost方法
+    #     C = self.calculate_cost(pred_logits, pred_boxes, gt_labels, gt_boxes)
 
 #         if self.training and not is_encoder and batch_idx is not None:
 #             if layer_idx is not None:  # 辅助层
@@ -573,8 +573,8 @@ sorted_dict = dict(sorted(id_to_gt.items(), key=lambda x: x[1], reverse=True))
 #         stability_cost[prev_q, prev_t] = 0.0
 #         return stability_cost
 
-    def reset_matches(self):
-        self.layer_matches.clear()
+    # def reset_matches(self):
+    #     self.layer_matches.clear()
 
 # 5. 需要注意的点：
 # stability_weight的选择很重要
