@@ -14,6 +14,7 @@ import util.utils as utils
 from util.coco_eval import CocoEvaluator
 from util.coco_utils import get_coco_api_from_dataset
 from util.collate_fn import DataPrefetcher
+from tools.query_matching_monitor import MatchingMonitor
 
 
 def train_one_epoch_acc(
@@ -107,6 +108,8 @@ def evaluate_acc(model, data_loader, epoch, accelerator=None):
     coco = get_coco_api_from_dataset(data_loader.dataset)
     coco_evaluator = CocoEvaluator(coco, ["bbox"])
 
+    monitor = MatchingMonitor(matcher=model.criterion.matcher)
+
     # for collect detection numbers
     category_det_nums = [0] * (max(coco.getCatIds()) + 1)
     for images, targets in metric_logger.log_every(data_loader, 10, header):
@@ -123,6 +126,9 @@ def evaluate_acc(model, data_loader, epoch, accelerator=None):
         coco_evaluator.update(res)
         evaluator_time = time.time() - evaluator_time
         metric_logger.update(model_time=model_time, evaluator_time=evaluator_time)
+
+        monitor.process_batch(outputs, targets)
+        monitor.report_statistics()
 
         # update detection number
         if len(coco_evaluator.coco_eval["bbox"].cocoDt.dataset) == 0:

@@ -2,11 +2,27 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Python: Remote Debug",
+            "name": "Python: Remote Debug for Main",
             "type": "python",
             "request": "launch",
             "program": "${workspaceFolder}/main.py",
             "args": [],
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "env": {
+                "CUDA_VISIBLE_DEVICES": "0"
+            }
+        },
+        {
+            "name": "Python: Remote Debug for Test",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/test.py",
+            "args": [
+                "--coco-path", "../autodl-tmp/data/COCO2017",
+                "--model-config", "configs/dino_pp/dino_pp_resnet50_800_1333.py",
+                "--checkpoint", "checkpoints/dino_pp_resnet50_800_1333/train/decoder-query-optm-v2.1-stable-many-matching_2025-01-10-13_38_45/best_ap.pth"
+            ],
             "console": "integratedTerminal",
             "justMyCode": false,
             "env": {
