@@ -90,7 +90,7 @@ def test_on_dataset():
 
     # get dataset
     dataset = CocoDetection(
-        img_folder=f"{args.coco_path}/{args.subset}2017",
+        img_folder=f"{args.coco_path}/images/{args.subset}2017",
         ann_file=f"{args.coco_path}/annotations/instances_{args.subset}2017.json",
         transforms=None,  # the eval_transform is integrated in the model
         train=args.subset == "train",
@@ -189,6 +189,13 @@ def test_on_dataset():
             text_font_color=args.text_font_color,
             text_alpha=args.text_alpha,
         )
+
+
+# How to evalulate
+# CUDA_VISIBLE_DEVICES=0 accelerate launch test.py \
+#   --coco-path ../autodl-tmp/data/COCO2017 \
+#   --model-config configs/dino_pp/dino_pp_resnet50_800_1333.py \
+#   --checkpoint checkpoints/dino_pp_resnet50_800_1333/train/decoder-query-optm-v2.1-stable-many-matching_2025-01-10-13_38_45/best_ap.pth
 
 
 if __name__ == "__main__":
