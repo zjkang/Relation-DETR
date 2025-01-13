@@ -4,6 +4,7 @@ from torch import Tensor, nn
 
 from models.bricks.denoising import GenerateCDNQueries
 from models.detectors.base_detector import DNDETRDetector
+from tools.query_matching_monitor import MatchingMonitor
 
 
 class DINO(DNDETRDetector):
@@ -44,6 +45,7 @@ class DINO(DNDETRDetector):
             label_noise_prob=0.5,
             box_noise_scale=1.0,
         )
+        self.monitor = MatchingMonitor(matcher=self.criterion.matcher)
 
     def forward(self, images: List[Tensor], targets: List[Dict] = None):
         # get original image sizes, used for postprocess
@@ -110,6 +112,8 @@ class DINO(DNDETRDetector):
                              for k in loss_dict.keys()
                              if k in weight_dict)
             return loss_dict
+
+        self.monitor.process_batch(output, targets)
 
         detections = self.postprocessor(output, original_image_sizes)
         return detections

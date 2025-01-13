@@ -1,6 +1,9 @@
 from collections import defaultdict
 import numpy as np
 import torch
+import logging
+import os
+
 
 class MatchingMonitor:
     def __init__(self, matcher):
@@ -10,6 +13,8 @@ class MatchingMonitor:
         Args:
             matcher: DETR的matcher实例
         """
+        self.logger = logging.getLogger(os.path.basename(os.getcwd()) + "." + __name__)
+        self.batch_count = 0
         self.matcher = matcher
         # 存储每个transition的统计信息
         self.accumulated_stats = defaultdict(lambda: {
@@ -31,6 +36,7 @@ class MatchingMonitor:
             outputs: 模型输出，包含最终输出和aux_outputs
             targets: 目标列表
         """
+        self.batch_count += 1
         layer_matches = {}
 
         # 获取最终层匹配
@@ -51,6 +57,8 @@ class MatchingMonitor:
 
         # 更新统计信息
         self._update_stats(layer_matches, targets)
+        if self.batch_count % 1000 == 0:
+            self.report_statistics()
 
     def _get_matches(self, pred_logits, pred_boxes, targets):
         """获取匹配关系"""
@@ -134,10 +142,10 @@ class MatchingMonitor:
 
     def report_statistics(self):
         """输出统计结果"""
-        print("\n=== Matching Change Statistics ===")
+        self.logger.info("\n=== Matching Change Statistics ===")
 
         for transition, stats in sorted(self.accumulated_stats.items()):
-            print(f"\n{transition}:")
+            self.logger.info(f"\n{transition}:")
 
             # 输出总体统计
             total = stats["total_queries"]
@@ -146,26 +154,26 @@ class MatchingMonitor:
             mean_ratio = np.mean(stats["change_ratios"])
             std_ratio = np.std(stats["change_ratios"])
 
-            print(f"Overall statistics:")
-            print(f"  Total queries: {total}")
-            print(f"  Changed queries: {changed}")
-            print(f"  Overall change ratio: {overall_ratio:.2f}%")
-            print(f"  Average batch change ratio: {mean_ratio:.2f}% ± {std_ratio:.2f}%")
+            self.logger.info(f"Overall statistics:")
+            self.logger.info(f"  Total queries: {total}")
+            self.logger.info(f"  Changed queries: {changed}")
+            self.logger.info(f"  Overall change ratio: {overall_ratio:.2f}%")
+            self.logger.info(f"  Average batch change ratio: {mean_ratio:.2f}% ± {std_ratio:.2f}%")
 
-            # 输出每个类别的统计
-            print("\nPer-class statistics:")
-            for class_id, class_stats in sorted(stats["per_class"].items()):
-                class_total = class_stats["total_queries"]
-                class_changed = class_stats["changed_queries"]
-                class_ratio = (class_changed / class_total * 100) if class_total > 0 else 0
-                class_mean = np.mean(class_stats["ratios"]) if class_stats["ratios"] else 0
-                class_std = np.std(class_stats["ratios"]) if class_stats["ratios"] else 0
+            # # 输出每个类别的统计
+            # self.logger.info("\nPer-class statistics:")
+            # for class_id, class_stats in sorted(stats["per_class"].items()):
+            #     class_total = class_stats["total_queries"]
+            #     class_changed = class_stats["changed_queries"]
+            #     class_ratio = (class_changed / class_total * 100) if class_total > 0 else 0
+            #     class_mean = np.mean(class_stats["ratios"]) if class_stats["ratios"] else 0
+            #     class_std = np.std(class_stats["ratios"]) if class_stats["ratios"] else 0
 
-                print(f"  Class {class_id}:")
-                print(f"    Total queries: {class_total}")
-                print(f"    Changed queries: {class_changed}")
-                print(f"    Overall change ratio: {class_ratio:.2f}%")
-                print(f"    Average change ratio: {class_mean:.2f}% ± {class_std:.2f}%")
+            #     self.logger.info(f"  Class {class_id}:")
+            #     self.logger.info(f"    Total queries: {class_total}")
+            #     self.logger.info(f"    Changed queries: {class_changed}")
+            #     self.logger.info(f"    Overall change ratio: {class_ratio:.2f}%")
+            #     self.logger.info(f"    Average change ratio: {class_mean:.2f}% ± {class_std:.2f}%")
 
     def reset(self):
         """重置统计数据"""

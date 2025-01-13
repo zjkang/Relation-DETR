@@ -70,12 +70,6 @@ transformer = DINOTransformer(
     two_stage_num_proposals=num_queries,
 )
 
-# num_groups: int = 5
-matcher = HungarianMatcher(cost_class=2, cost_bbox=5, cost_giou=2,
-                           focal_alpha=0.25, focal_gamma=2.0, mixed_match=True)
-# matcher = StableHungarianMatcher(
-#     cost_class=2, cost_bbox=5, cost_giou=2, focal_alpha=0.25, focal_gamma=2.0, stability_weight=0.2)
-
 weight_dict = {"loss_class": 1, "loss_bbox": 5, "loss_giou": 2}
 weight_dict.update({"loss_class_dn": 1, "loss_bbox_dn": 5, "loss_giou_dn": 2})
 weight_dict.update({
@@ -85,10 +79,26 @@ weight_dict.update({
 })
 weight_dict.update({"loss_class_enc": 1, "loss_bbox_enc": 5, "loss_giou_enc": 2})
 
+# DINO version
+# matcher = HungarianMatcher(cost_class=2, cost_bbox=5, cost_giou=2,
+#                            focal_alpha=0.25, focal_gamma=2.0, mixed_match=True)
 # criterion = SetCriterion(num_classes, matcher=matcher, weight_dict=weight_dict, alpha=0.25, gamma=2.0)
+
+# Spec Query version
+# num_groups: int = 5
+
+# Stable V1 version
+# matcher = StableHungarianMatcher(
+#     cost_class=2, cost_bbox=5, cost_giou=2, focal_alpha=0.25, focal_gamma=2.0, stability_weight=0.2)
 # criterion = StableSetCriterion(num_classes, matcher=matcher, weight_dict=weight_dict, alpha=0.25, gamma=2.0)
+
+# Stable V2 version
+matcher = HungarianMatcher(cost_class=2, cost_bbox=5, cost_giou=2,
+                           focal_alpha=0.25, focal_gamma=2.0, mixed_match=True)
 criterion = StableHybridSetCriterion(
-    num_classes, matcher=matcher, weight_dict=weight_dict, alpha=0.25, gamma=2.0)
+    num_classes, matcher=matcher, weight_dict=weight_dict,
+    alpha=0.25, gamma=2.0, matching_copies=[2,2,2,2,2,2,1])
+
 postprocessor = PostProcess(select_box_nums_for_evaluation=300)
 
 # combine above components to instantiate the model
