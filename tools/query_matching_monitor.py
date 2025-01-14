@@ -236,18 +236,18 @@ class MatchingMonitor:
                 self.logger.info(f"    Query IDs: {sorted(queries)}")
 
             # 2. 每个query预测的类别数量
-            self.logger.info("\nClasses per query:")
-            query_stats = defaultdict(int)  # 统计预测多个类别的query数量
-            for query_id, classes in sorted(self.query_class_stats[layer_name].items()):
-                n_classes = len(classes)
-                query_stats[n_classes] += 1
-                self.logger.info(f"  Query {query_id}: {n_classes} classes")
-                self.logger.info(f"    Class IDs: {sorted(classes)}")
+            # self.logger.info("\nClasses per query:")
+            # query_stats = defaultdict(int)  # 统计预测多个类别的query数量
+            # for query_id, classes in sorted(self.query_class_stats[layer_name].items()):
+            #     n_classes = len(classes)
+            #     query_stats[n_classes] += 1
+            #     self.logger.info(f"  Query {query_id}: {n_classes} classes")
+            #     self.logger.info(f"    Class IDs: {sorted(classes)}")
 
             # 输出query多样性统计
-            self.logger.info("\nQuery diversity statistics:")
-            for n_classes, count in sorted(query_stats.items()):
-                self.logger.info(f"  {count} queries predicted {n_classes} different classes")
+            # self.logger.info("\nQuery diversity statistics:")
+            # for n_classes, count in sorted(query_stats.items()):
+            #     self.logger.info(f"  {count} queries predicted {n_classes} different classes")
 
             # 计算一些汇总统计
             total_queries = len(self.query_class_stats[layer_name])
