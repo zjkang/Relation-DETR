@@ -233,7 +233,7 @@ class MatchingMonitor:
             self.logger.info("\nQueries per class:")
             for class_id, queries in sorted(self.class_query_stats[layer_name].items()):
                 self.logger.info(f"  Class {class_id}: {len(queries)} unique queries")
-                self.logger.info(f"    Query IDs: {sorted(queries)}")
+                # self.logger.info(f"    Query IDs: {sorted(queries)}")
 
             # 2. 每个query预测的类别数量
             # self.logger.info("\nClasses per query:")
