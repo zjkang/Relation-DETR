@@ -28,6 +28,11 @@ class MatchingMonitor:
                 "ratios": []
             })
         })
+        # 新增：每层每个类别使用的query统计
+        self.class_query_stats = defaultdict(lambda: defaultdict(set))  # {layer: {class_id: set(queries)}}
+        # 新增：每层每个query预测的类别统计
+        self.query_class_stats = defaultdict(lambda: defaultdict(set))  # {layer: {query_id: set(classes)}}
+
 
     def process_batch(self, outputs, targets):
         """
@@ -59,9 +64,11 @@ class MatchingMonitor:
 
         # 更新统计信息
         self._update_stats(layer_matches, targets)
+        self._update_query_usage_stats(layer_matches, targets)  # 累积query使用统计
+        self.batch_count += 1
         if self.batch_count % 1000 == 0:
             self.report_statistics()
-        self.batch_count += 1
+
 
     # assume many-to-one matching layer by layer in non-increasing order
     # matching_copies None: no extra copies
@@ -70,6 +77,7 @@ class MatchingMonitor:
         """获取匹配关系"""
         return [self.matcher(b, l, gt['boxes'], gt['labels'], gt_copy=gt_copy)
                 for b, l, gt in zip(pred_boxes, pred_logits, targets)]
+
 
     def _calculate_query_changes(self, curr_queries: set, next_queries: set):
         """
@@ -88,6 +96,7 @@ class MatchingMonitor:
         common = len(curr_queries & next_queries)
         changed = min_size - common
         return changed, min_size
+
 
     def _update_stats(self, layer_matches, targets):
         """更新统计信息"""
@@ -148,6 +157,7 @@ class MatchingMonitor:
                     class_ratio = (class_stat["changed_queries"] / class_stat["total_queries"] * 100)
                     per_class["ratios"].append(class_ratio)
 
+
     def report_statistics(self):
         """输出统计结果"""
         self.logger.info("\n=== Matching Change Statistics ===")
@@ -183,6 +193,69 @@ class MatchingMonitor:
             #     self.logger.info(f"    Overall change ratio: {class_ratio:.2f}%")
             #     self.logger.info(f"    Average change ratio: {class_mean:.2f}% ± {class_std:.2f}%")
 
+
     def reset(self):
         """重置统计数据"""
         self.accumulated_stats.clear()
+        self.class_query_stats.clear()
+        self.query_class_stats.clear()
+
+    def _update_query_usage_stats(self, layer_matches, targets):
+        """统计每层的query使用情况"""
+        for layer_name, batch_matches in layer_matches.items():
+            # 遍历batch中的每张图片
+            for matches, target in zip(batch_matches, targets):
+                pred_idx, tgt_idx = matches
+                target_labels = target['labels']
+
+                # 遍历每个目标
+                for tgt_idx_i in torch.unique(tgt_idx):
+                    class_id = target_labels[tgt_idx_i].item()
+                    matched_queries = pred_idx[tgt_idx == tgt_idx_i].tolist()
+
+                    # 更新类别使用的query统计
+                    self.class_query_stats[layer_name][class_id].update(matched_queries)
+
+                    # 更新query预测的类别统计
+                    for query_id in matched_queries:
+                        self.query_class_stats[layer_name][query_id].add(class_id)
+
+    def report_query_usage_statistics(self):
+        """报告query使用情况的统计"""
+        print("\n=== Query Usage Statistics ===")
+
+        # 按层输出统计信息
+        for layer_name in sorted(self.class_query_stats.keys()):
+            print(f"\nLayer: {layer_name}")
+
+            # 1. 每个类别使用的query数量
+            print("\nQueries per class:")
+            for class_id, queries in sorted(self.class_query_stats[layer_name].items()):
+                print(f"  Class {class_id}: {len(queries)} unique queries")
+                print(f"    Query IDs: {sorted(queries)}")
+
+            # 2. 每个query预测的类别数量
+            print("\nClasses per query:")
+            query_stats = defaultdict(int)  # 统计预测多个类别的query数量
+            for query_id, classes in sorted(self.query_class_stats[layer_name].items()):
+                n_classes = len(classes)
+                query_stats[n_classes] += 1
+                print(f"  Query {query_id}: {n_classes} classes")
+                print(f"    Class IDs: {sorted(classes)}")
+
+            # 输出query多样性统计
+            print("\nQuery diversity statistics:")
+            for n_classes, count in sorted(query_stats.items()):
+                print(f"  {count} queries predicted {n_classes} different classes")
+
+            # 计算一些汇总统计
+            total_queries = len(self.query_class_stats[layer_name])
+            total_classes = len(self.class_query_stats[layer_name])
+            avg_classes_per_query = sum(len(classes) for classes in self.query_class_stats[layer_name].values()) / total_queries if total_queries > 0 else 0
+            avg_queries_per_class = sum(len(queries) for queries in self.class_query_stats[layer_name].values()) / total_classes if total_classes > 0 else 0
+
+            print("\nSummary:")
+            print(f"  Total unique queries used: {total_queries}")
+            print(f"  Total classes: {total_classes}")
+            print(f"  Average classes per query: {avg_classes_per_query:.2f}")
+            print(f"  Average queries per class: {avg_queries_per_class:.2f}")
