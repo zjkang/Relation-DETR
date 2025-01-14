@@ -68,6 +68,7 @@ class MatchingMonitor:
         self.batch_count += 1
         if self.batch_count % 1000 == 0:
             self.report_statistics()
+            self.report_query_usage_statistics()
 
 
     # assume many-to-one matching layer by layer in non-increasing order
@@ -222,31 +223,31 @@ class MatchingMonitor:
 
     def report_query_usage_statistics(self):
         """报告query使用情况的统计"""
-        print("\n=== Query Usage Statistics ===")
+        self.logger.info("\n=== Query Usage Statistics ===")
 
         # 按层输出统计信息
         for layer_name in sorted(self.class_query_stats.keys()):
-            print(f"\nLayer: {layer_name}")
+            self.logger.info(f"\nLayer: {layer_name}")
 
             # 1. 每个类别使用的query数量
-            print("\nQueries per class:")
+            self.logger.info("\nQueries per class:")
             for class_id, queries in sorted(self.class_query_stats[layer_name].items()):
-                print(f"  Class {class_id}: {len(queries)} unique queries")
-                print(f"    Query IDs: {sorted(queries)}")
+                self.logger.info(f"  Class {class_id}: {len(queries)} unique queries")
+                self.logger.info(f"    Query IDs: {sorted(queries)}")
 
             # 2. 每个query预测的类别数量
-            print("\nClasses per query:")
+            self.logger.info("\nClasses per query:")
             query_stats = defaultdict(int)  # 统计预测多个类别的query数量
             for query_id, classes in sorted(self.query_class_stats[layer_name].items()):
                 n_classes = len(classes)
                 query_stats[n_classes] += 1
-                print(f"  Query {query_id}: {n_classes} classes")
-                print(f"    Class IDs: {sorted(classes)}")
+                self.logger.info(f"  Query {query_id}: {n_classes} classes")
+                self.logger.info(f"    Class IDs: {sorted(classes)}")
 
             # 输出query多样性统计
-            print("\nQuery diversity statistics:")
+            self.logger.info("\nQuery diversity statistics:")
             for n_classes, count in sorted(query_stats.items()):
-                print(f"  {count} queries predicted {n_classes} different classes")
+                self.logger.info(f"  {count} queries predicted {n_classes} different classes")
 
             # 计算一些汇总统计
             total_queries = len(self.query_class_stats[layer_name])
@@ -254,8 +255,8 @@ class MatchingMonitor:
             avg_classes_per_query = sum(len(classes) for classes in self.query_class_stats[layer_name].values()) / total_queries if total_queries > 0 else 0
             avg_queries_per_class = sum(len(queries) for queries in self.class_query_stats[layer_name].values()) / total_classes if total_classes > 0 else 0
 
-            print("\nSummary:")
-            print(f"  Total unique queries used: {total_queries}")
-            print(f"  Total classes: {total_classes}")
-            print(f"  Average classes per query: {avg_classes_per_query:.2f}")
-            print(f"  Average queries per class: {avg_queries_per_class:.2f}")
+            self.logger.info("\nSummary:")
+            self.logger.info(f"  Total unique queries used: {total_queries}")
+            self.logger.info(f"  Total classes: {total_classes}")
+            self.logger.info(f"  Average classes per query: {avg_classes_per_query:.2f}")
+            self.logger.info(f"  Average queries per class: {avg_queries_per_class:.2f}")
