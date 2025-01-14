@@ -45,7 +45,10 @@ class DINO(DNDETRDetector):
             label_noise_prob=0.5,
             box_noise_scale=1.0,
         )
-        self.monitor = MatchingMonitor(matcher=self.criterion.matcher)
+        self.monitor = MatchingMonitor(
+            matcher=self.criterion.matcher,
+            matching_copies=self.criterion.matching_copies[1:]
+                if self.criterion.matching_copies is not None else None)
 
     def forward(self, images: List[Tensor], targets: List[Dict] = None):
         # get original image sizes, used for postprocess

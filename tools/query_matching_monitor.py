@@ -6,7 +6,7 @@ import os
 
 
 class MatchingMonitor:
-    def __init__(self, matcher):
+    def __init__(self, matcher, matching_copies=None):
         """
         初始化匹配监控器
 
@@ -16,6 +16,7 @@ class MatchingMonitor:
         self.logger = logging.getLogger(os.path.basename(os.getcwd()) + "." + __name__)
         self.batch_count = 0
         self.matcher = matcher
+        self.matching_copies = matching_copies if matching_copies is not None else [1,1,1,1,1,1]
         # 存储每个transition的统计信息
         self.accumulated_stats = defaultdict(lambda: {
             "total_queries": 0,          # 总query数
@@ -36,14 +37,14 @@ class MatchingMonitor:
             outputs: 模型输出，包含最终输出和aux_outputs
             targets: 目标列表
         """
-        self.batch_count += 1
         layer_matches = {}
 
         # 获取最终层匹配
         layer_matches['decoder_final'] = self._get_matches(
             outputs['pred_logits'],
             outputs['pred_boxes'],
-            targets
+            targets,
+            gt_copy=self.matching_copies[-1]
         )
 
         # 获取中间层匹配
@@ -52,22 +53,29 @@ class MatchingMonitor:
                 layer_matches[f'decoder_{idx}'] = self._get_matches(
                     aux_out['pred_logits'],
                     aux_out['pred_boxes'],
-                    targets
+                    targets,
+                    gt_copy=self.matching_copies[idx]
                 )
 
         # 更新统计信息
         self._update_stats(layer_matches, targets)
         if self.batch_count % 1000 == 0:
             self.report_statistics()
+        self.batch_count += 1
 
-    def _get_matches(self, pred_logits, pred_boxes, targets):
+    # assume many-to-one matching layer by layer in non-increasing order
+    # matching_copies None: no extra copies
+    # [2,2,2,2,2,2,1]: current logic
+    def _get_matches(self, pred_logits, pred_boxes, targets, gt_copy=1):
         """获取匹配关系"""
-        return [self.matcher(b, l, gt['boxes'], gt['labels'])
+        return [self.matcher(b, l, gt['boxes'], gt['labels'], gt_copy=gt_copy)
                 for b, l, gt in zip(pred_boxes, pred_logits, targets)]
 
     def _calculate_query_changes(self, curr_queries: set, next_queries: set):
         """
         计算实际的query匹配变化数量
+        if curr_queries = [1,3], next_queries = [1],可以认为没有发生匹配变化,因为至少有一个query匹配到了
+        then no change, changed = 0, min_size = 1
 
         Args:
             curr_queries: 当前层匹配的query集合
