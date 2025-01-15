@@ -6,6 +6,7 @@ import logging
 import os
 import tempfile
 from typing import Dict
+from datetime import datetime
 
 import accelerate
 import torch
@@ -84,9 +85,23 @@ def test_on_dataset():
     # torch.use_deterministic_algorithms(True, warn_only=True)
 
     # setup logger
-    for logger_name in ["py.warnings", "accelerate", os.path.basename(os.getcwd())]:
-        setup_logger(distributed_rank=accelerator.local_process_index, name=logger_name)
-    logger = logging.getLogger(os.path.basename(os.getcwd()))
+    # for logger_name in ["py.warnings", "accelerate", os.path.basename(os.getcwd())]:
+    #     setup_logger(distributed_rank=accelerator.local_process_index, name=logger_name,
+    #                  log_file=os.path.join(log_dir, f"{logger_name}.log"))
+    # logger = logging.getLogger(os.path.basename(os.getcwd()))
+    # 获取当前时间
+    current_time = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    logger_name = f"{os.path.basename(os.getcwd())}_{current_time}"
+    log_dir = os.path.join(os.getcwd(), "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    for name in ["py.warnings", "accelerate", logger_name]:
+        setup_logger(
+            distributed_rank=accelerator.local_process_index,
+            name=name,
+            log_file=os.path.join(log_dir, f"{name}.log")
+        )
+    logger = logging.getLogger(logger_name)
+
 
     # get dataset
     dataset = CocoDetection(
