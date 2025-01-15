@@ -79,11 +79,11 @@ weight_dict.update({
 })
 weight_dict.update({"loss_class_enc": 1, "loss_bbox_enc": 5, "loss_giou_enc": 2})
 weight_dict.update({
-    'loss_consistency_aux_0_to_aux_1': 0.05,
+    'loss_consistency_aux_0_to_aux_1': 0.1,
     'loss_consistency_aux_1_to_aux_2': 0.1,
     'loss_consistency_aux_2_to_aux_3': 0.15,
-    'loss_consistency_aux_3_to_aux_4': 0.2,
-    'loss_consistency_aux_4_to_final': 0.25
+    'loss_consistency_aux_3_to_aux_4': 0.15,
+    'loss_consistency_aux_4_to_final': 0.25,
 })
 
 

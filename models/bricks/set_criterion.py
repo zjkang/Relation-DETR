@@ -382,7 +382,7 @@ class StableHybridSetCriterion(SetCriterion):
         gamma: float = 2.0,
         two_stage_binary_cls=False,
         matching_copies=[2,2,2,2,2,2,1],
-        consistency_weights=[0.05, 0.1, 0.15, 0.25, 0.4, 0.6]
+        consistency_weights=[0.5, 1.0, 1.5, 2.0, 2.5, 3.0]
     ):
         """
         Args:
@@ -396,15 +396,21 @@ class StableHybridSetCriterion(SetCriterion):
         self._cached_indices = {}
 
 
-    def compute_all_consistency_losses(self, all_indices):
+    def compute_all_consistency_losses(self, all_indices, outputs):
         """计算所有层间的一致性损失
 
         Args:
             all_indices: List of tuples (layer_name, indices)
-            按照从浅到深的顺序排列：[("aux_0", aux0_indices), ..., ("final", final_indices)]
-
-        Returns:
-            consistency_losses: 包含所有层间一致性损失的字典
+                按照从浅到深的顺序排列：[("aux_0", aux0_indices), ..., ("final", final_indices)]
+            outputs: 包含所有层输出的字典
+                {
+                    "pred_logits": final_layer_logits,
+                    "aux_outputs": [
+                        {"pred_logits": aux0_logits, ...},
+                        {"pred_logits": aux1_logits, ...},
+                        ...
+                    ]
+                }
         """
         consistency_losses = {}
 
@@ -413,14 +419,30 @@ class StableHybridSetCriterion(SetCriterion):
             curr_name, curr_indices = all_indices[i]
             next_name, next_indices = all_indices[i + 1]
 
+            # 获取当前层和下一层的输出
+            if curr_name == "final":
+                curr_outputs = outputs
+            else:
+                # aux_0 -> outputs["aux_outputs"][0]
+                layer_idx = int(curr_name.split('_')[1])
+                curr_outputs = outputs["aux_outputs"][layer_idx]
+
+            if next_name == "final":
+                next_outputs = outputs
+            else:
+                layer_idx = int(next_name.split('_')[1])
+                next_outputs = outputs["aux_outputs"][layer_idx]
+
             # 计算相邻层之间的一致性损失
             consistency_loss = self.compute_matching_consistency_loss(
-                curr_indices, next_indices
+                curr_indices, 
+                next_indices,
+                curr_outputs,  # 当前层的输出
+                next_outputs   # 下一层的输出
             )
 
             # 获取当前层的索引（用于权重）
-            # aux_0 -> 0, aux_1 -> 1, 等等
-            weight_idx = int(curr_name.split('_')[1])
+            weight_idx = int(curr_name.split('_')[1]) if curr_name != "final" else len(self.consistency_weights) - 1
             weight = self.consistency_weights[weight_idx]
 
             # 添加到损失字典
@@ -429,40 +451,222 @@ class StableHybridSetCriterion(SetCriterion):
 
         return consistency_losses
 
-
-    def compute_matching_consistency_loss(self, prev_indices, curr_indices):
-        """计算两层之间匹配的一致性损失，考虑到一个gt可能匹配多个query的情况"""
+    def compute_matching_consistency_loss(self, prev_indices, curr_indices, prev_outputs, curr_outputs):
+        """使用预测的概率/分数来计算一致性损失"""
         batch_size = len(prev_indices)
-        consistency_loss = 0
-
+        device = prev_outputs['pred_logits'].device  # 直接使用输入张量的设备
+        dtype = prev_outputs['pred_logits'].dtype
+        
+        # 确保输入在正确的设备上
+        prev_logits = prev_outputs['pred_logits']  # 已经在正确设备上，无需.to(device)
+        curr_logits = curr_outputs['pred_logits']
+        prev_probs = F.softmax(prev_logits, dim=-1)
+        curr_probs = F.softmax(curr_logits, dim=-1)
+        
+        # 初始化损失张量，确保在正确的设备上
+        consistency_loss = torch.zeros(1, device=device, dtype=dtype)
+        
         for b in range(batch_size):
-            prev_src, prev_tgt = prev_indices[b]
-            curr_src, curr_tgt = curr_indices[b]
-
-            # 创建target -> queries的映射
+            # 确保索引在正确的设备上
+            prev_src = prev_indices[b][0].to(device)
+            prev_tgt = prev_indices[b][1].to(device)
+            curr_src = curr_indices[b][0].to(device)
+            curr_tgt = curr_indices[b][1].to(device)
+            
+            # 创建映射
             prev_t2q = {}
-            for s, t in zip(prev_src, prev_tgt):
+            for s, t in zip(prev_src.cpu(), prev_tgt.cpu()):  # 临时转到CPU处理
                 t_item = t.item()
                 if t_item not in prev_t2q:
-                    prev_t2q[t_item] = set()
-                prev_t2q[t_item].add(s.item())
+                    prev_t2q[t_item] = []
+                prev_t2q[t_item].append(s.item())
 
             curr_t2q = {}
-            for s, t in zip(curr_src, curr_tgt):
+            for s, t in zip(curr_src.cpu(), curr_tgt.cpu()):  # 临时转到CPU处理
                 t_item = t.item()
                 if t_item not in curr_t2q:
-                    curr_t2q[t_item] = set()
-                curr_t2q[t_item].add(s.item())
+                    curr_t2q[t_item] = []
+                curr_t2q[t_item].append(s.item())
 
-            # 对于每个target，检查匹配的一致性
-            for target_idx in set(prev_t2q.keys()) & set(curr_t2q.keys()):
-                prev_queries = prev_t2q[target_idx]
-                curr_queries = curr_t2q[target_idx]
-                # 计算交集大小
-                intersection = curr_queries & prev_queries
-                consistency_loss += len(curr_queries) - len(intersection)
+            batch_loss = torch.zeros(1, device=device, dtype=dtype)
+            common_targets = set(prev_t2q.keys()) & set(curr_t2q.keys())
+            
+            if not common_targets:  # 如果没有共同目标，跳过这个batch
+                continue
+                
+            for target_idx in common_targets:
+                # 将索引转换为张量并移到正确的设备上
+                prev_queries = torch.tensor(prev_t2q[target_idx], device=device, dtype=torch.long)
+                curr_queries = torch.tensor(curr_t2q[target_idx], device=device, dtype=torch.long)
+                
+                # 获取概率并计算平均值
+                prev_target_probs = prev_probs[b][prev_queries]
+                curr_target_probs = curr_probs[b][curr_queries]
+                
+                prev_mean_probs = prev_target_probs.mean(0)
+                curr_mean_probs = curr_target_probs.mean(0)
+                
+                # 计算KL散度
+                loss = F.kl_div(prev_mean_probs.log(), curr_mean_probs, reduction='batchmean')
+                
+                # 应用缩放因子
+                scale = torch.tensor(1000.0, device=device, dtype=dtype)
+                loss = loss * scale
+                
+                batch_loss = batch_loss + loss
+            
+            # 计算这个batch的平均损失
+            n_targets = torch.tensor(float(len(common_targets)), device=device, dtype=dtype)
+            consistency_loss = consistency_loss + batch_loss / n_targets
+        
+        # 计算所有batch的平均损失
+        n_batch = torch.tensor(float(batch_size), device=device, dtype=dtype)
+        final_loss = consistency_loss / n_batch
+        
+        # 最后检查确保返回值在正确的设备上
+        return final_loss.to(device)
 
-        return consistency_loss / batch_size
+    # def compute_matching_consistency_loss(self, prev_indices, curr_indices, prev_outputs, curr_outputs):
+    #     """使用预测的概率/分数来计算一致性损失"""
+    #     batch_size = len(prev_indices)
+    #     device = prev_indices[0][0].device
+        
+    #     # 获取两层的预测概率
+    #     prev_logits = prev_outputs['pred_logits']
+    #     curr_logits = curr_outputs['pred_logits']
+    #     prev_probs = F.softmax(prev_logits, dim=-1)
+    #     curr_probs = F.softmax(curr_logits, dim=-1)
+        
+    #     consistency_loss = torch.tensor(0., device=device)
+        
+    #     for b in range(batch_size):
+    #         prev_src, prev_tgt = prev_indices[b]
+    #         curr_src, curr_tgt = curr_indices[b]
+            
+    #         # 创建target -> queries的映射
+    #         prev_t2q = {}
+    #         for s, t in zip(prev_src, prev_tgt):
+    #             t_item = t.item()
+    #             if t_item not in prev_t2q:
+    #                 prev_t2q[t_item] = []
+    #             prev_t2q[t_item].append(s.item())
+
+    #         curr_t2q = {}
+    #         for s, t in zip(curr_src, curr_tgt):
+    #             t_item = t.item()
+    #             if t_item not in curr_t2q:
+    #                 curr_t2q[t_item] = []
+    #             curr_t2q[t_item].append(s.item())
+
+    #         # 对每个共同的目标计算一致性损失
+    #         batch_loss = torch.tensor(0., device=device)
+    #         common_targets = set(prev_t2q.keys()) & set(curr_t2q.keys())
+            
+    #         for target_idx in common_targets:
+    #             prev_queries = prev_t2q[target_idx]
+    #             curr_queries = curr_t2q[target_idx]
+                
+    #             # 获取这个目标的所有匹配查询的预测概率
+    #             prev_target_probs = prev_probs[b][prev_queries]  # shape: [n_prev, num_classes]
+    #             curr_target_probs = curr_probs[b][curr_queries]  # shape: [n_curr, num_classes]
+                
+    #             # 计算平均预测概率
+    #             prev_mean_probs = prev_target_probs.mean(0)  # shape: [num_classes]
+    #             curr_mean_probs = curr_target_probs.mean(0)  # shape: [num_classes]
+                
+    #             # 计算KL散度
+    #             loss = F.kl_div(
+    #                 prev_mean_probs.log(),
+    #                 curr_mean_probs,
+    #                 reduction='batchmean'
+    #             )
+                
+    #             batch_loss = batch_loss + loss
+            
+    #         # 对该batch中的所有目标取平均
+    #         if common_targets:
+    #             consistency_loss = consistency_loss + batch_loss / len(common_targets)
+            
+    #     return consistency_loss / batch_size
+
+
+    # def compute_all_consistency_losses(self, all_indices):
+    #     """计算所有层间的一致性损失
+
+    #     Args:
+    #         all_indices: List of tuples (layer_name, indices)
+    #         按照从浅到深的顺序排列：[("aux_0", aux0_indices), ..., ("final", final_indices)]
+
+    #     Returns:
+    #         consistency_losses: 包含所有层间一致性损失的字典
+    #     """
+    #     consistency_losses = {}
+
+    #     # 从浅到深遍历相邻层
+    #     for i in range(len(all_indices) - 1):
+    #         curr_name, curr_indices = all_indices[i]
+    #         next_name, next_indices = all_indices[i + 1]
+
+    #         # 计算相邻层之间的一致性损失
+    #         consistency_loss = self.compute_matching_consistency_loss(
+    #             curr_indices, next_indices
+    #         )
+
+    #         # 获取当前层的索引（用于权重）
+    #         # aux_0 -> 0, aux_1 -> 1, 等等
+    #         weight_idx = int(curr_name.split('_')[1])
+    #         weight = self.consistency_weights[weight_idx]
+
+    #         # 添加到损失字典
+    #         loss_name = f"loss_consistency_{curr_name}_to_{next_name}"
+    #         consistency_losses[loss_name] = consistency_loss * weight
+
+    #     return consistency_losses
+
+    # def compute_matching_consistency_loss(self, prev_indices, curr_indices):
+    #     """计算两层之间匹配的一致性损失，考虑到一个gt可能匹配多个query的情况"""
+    #     batch_size = len(prev_indices)
+    #      # 创建一个需要梯度的张量
+    #     consistency_loss = torch.zeros(1, device=prev_indices[0][0].device, requires_grad=True)
+    #     for b in range(batch_size):
+    #         prev_src, prev_tgt = prev_indices[b]
+    #         curr_src, curr_tgt = curr_indices[b]
+
+    #         # 创建target -> queries的映射
+    #         prev_t2q = {}
+    #         for s, t in zip(prev_src, prev_tgt):
+    #             t_item = t.item()
+    #             if t_item not in prev_t2q:
+    #                 prev_t2q[t_item] = set()
+    #             prev_t2q[t_item].add(s.item())
+
+    #         curr_t2q = {}
+    #         for s, t in zip(curr_src, curr_tgt):
+    #             t_item = t.item()
+    #             if t_item not in curr_t2q:
+    #                 curr_t2q[t_item] = set()
+    #             curr_t2q[t_item].add(s.item())
+
+    #         batch_loss = torch.zeros(1, device=prev_src.device, requires_grad=True) 
+    #         # 对于每个target，检查匹配的一致性
+    #         for target_idx in set(prev_t2q.keys()) & set(curr_t2q.keys()):
+    #             prev_queries = prev_t2q[target_idx]
+    #             curr_queries = curr_t2q[target_idx]
+    #             # 计算交集大小
+    #             intersection = curr_queries & prev_queries
+                
+    #             # 计算不一致的比例而不是绝对数量
+    #             total_queries = len(curr_queries)
+    #             if total_queries > 0:  # 避免除零
+    #                 inconsistency_ratio = (total_queries - len(intersection)) / total_queries
+    #                 batch_loss += inconsistency_ratio
+
+    #         # 对该batch中的所有target取平均
+    #         num_targets = len(set(prev_t2q.keys()) & set(curr_t2q.keys()))
+    #         if num_targets > 0:  # 避免除零
+    #             consistency_loss += batch_loss / num_targets
+
+    #     return consistency_loss / batch_size
 
     def forward(self, outputs, targets):
         # Compute the average number of target boxes accross all nodes, for normalization purposes
@@ -528,7 +732,7 @@ class StableHybridSetCriterion(SetCriterion):
         layer_order.append("final")
 
         all_indices = [(name, self._cached_indices[name]) for name in layer_order]
-        consistency_losses = self.compute_all_consistency_losses(all_indices)
+        consistency_losses = self.compute_all_consistency_losses(all_indices, outputs)
         losses.update(consistency_losses)
 
         self._cached_indices = {}
