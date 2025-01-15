@@ -366,7 +366,12 @@ class HybridSetCriterion(SetCriterion):
 
 #         return losses
 
-
+# # 方案1：线性增长但起点更小
+# consistency_weights=[0.05, 0.1, 0.2, 0.3, 0.4, 0.5]
+# # 方案2：指数增长
+# consistency_weights=[0.05, 0.1, 0.15, 0.25, 0.4, 0.6]
+# # 方案3：更温和的线性增长
+# consistency_weights=[0.1, 0.15, 0.2, 0.25, 0.3, 0.35]
 class StableHybridSetCriterion(SetCriterion):
     def __init__(
         self,
@@ -376,7 +381,8 @@ class StableHybridSetCriterion(SetCriterion):
         alpha: float = 0.25,
         gamma: float = 2.0,
         two_stage_binary_cls=False,
-        matching_copies=[2,2,2,2,2,2,1]
+        matching_copies=[2,2,2,2,2,2,1],
+        consistency_weights=[0.05, 0.1, 0.15, 0.25, 0.4, 0.6]
     ):
         """
         Args:
@@ -385,6 +391,78 @@ class StableHybridSetCriterion(SetCriterion):
         """
         super().__init__(num_classes, matcher, weight_dict, alpha, gamma, two_stage_binary_cls)
         self.matching_copies = matching_copies
+        self.consistency_weights = consistency_weights
+        # 使用字典缓存匹配结果
+        self._cached_indices = {}
+
+
+    def compute_all_consistency_losses(self, all_indices):
+        """计算所有层间的一致性损失
+
+        Args:
+            all_indices: List of tuples (layer_name, indices)
+            按照从浅到深的顺序排列：[("aux_0", aux0_indices), ..., ("final", final_indices)]
+
+        Returns:
+            consistency_losses: 包含所有层间一致性损失的字典
+        """
+        consistency_losses = {}
+
+        # 从浅到深遍历相邻层
+        for i in range(len(all_indices) - 1):
+            curr_name, curr_indices = all_indices[i]
+            next_name, next_indices = all_indices[i + 1]
+
+            # 计算相邻层之间的一致性损失
+            consistency_loss = self.compute_matching_consistency_loss(
+                curr_indices, next_indices
+            )
+
+            # 获取当前层的索引（用于权重）
+            # aux_0 -> 0, aux_1 -> 1, 等等
+            weight_idx = int(curr_name.split('_')[1])
+            weight = self.consistency_weights[weight_idx]
+
+            # 添加到损失字典
+            loss_name = f"loss_consistency_{curr_name}_to_{next_name}"
+            consistency_losses[loss_name] = consistency_loss * weight
+
+        return consistency_losses
+
+
+    def compute_matching_consistency_loss(self, prev_indices, curr_indices):
+        """计算两层之间匹配的一致性损失，考虑到一个gt可能匹配多个query的情况"""
+        batch_size = len(prev_indices)
+        consistency_loss = 0
+
+        for b in range(batch_size):
+            prev_src, prev_tgt = prev_indices[b]
+            curr_src, curr_tgt = curr_indices[b]
+
+            # 创建target -> queries的映射
+            prev_t2q = {}
+            for s, t in zip(prev_src, prev_tgt):
+                t_item = t.item()
+                if t_item not in prev_t2q:
+                    prev_t2q[t_item] = set()
+                prev_t2q[t_item].add(s.item())
+
+            curr_t2q = {}
+            for s, t in zip(curr_src, curr_tgt):
+                t_item = t.item()
+                if t_item not in curr_t2q:
+                    curr_t2q[t_item] = set()
+                curr_t2q[t_item].add(s.item())
+
+            # 对于每个target，检查匹配的一致性
+            for target_idx in set(prev_t2q.keys()) & set(curr_t2q.keys()):
+                prev_queries = prev_t2q[target_idx]
+                curr_queries = curr_t2q[target_idx]
+                # 计算交集大小
+                intersection = curr_queries & prev_queries
+                consistency_loss += len(curr_queries) - len(intersection)
+
+        return consistency_loss / batch_size
 
     def forward(self, outputs, targets):
         # Compute the average number of target boxes accross all nodes, for normalization purposes
@@ -398,6 +476,8 @@ class StableHybridSetCriterion(SetCriterion):
         # 将目标框数量除以GPU数量，并确保最小值为1
         num_boxes = torch.clamp(num_boxes / get_world_size(), min=1).item()
 
+        self._cached_indices = {}
+
         # Compute all the requested losses
         losses = {}
         # 移除aux_outputs和enc_outputs，只保留主要输出
@@ -406,14 +486,21 @@ class StableHybridSetCriterion(SetCriterion):
             for k, v in outputs.items()
             if k != "aux_outputs" and k != "enc_outputs"
         }
-        losses.update(self.calculate_loss(matching_outputs, targets, num_boxes, gt_copy=self.matching_copies[-1]))
+        losses.update(
+            self.calculate_loss(
+                matching_outputs, targets, num_boxes,
+                gt_copy=self.matching_copies[-1],
+                layer_name="final"))
 
         # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.
         if "aux_outputs" in outputs:
             # 计算辅助损失 (来自decoder的每一层)
             for i, aux_outputs in enumerate(outputs["aux_outputs"]):
                 # get matching results for each image
-                losses_aux = self.calculate_loss(aux_outputs, targets, num_boxes, gt_copy=self.matching_copies[i+1])
+                losses_aux = self.calculate_loss(
+                    aux_outputs, targets, num_boxes,
+                    gt_copy=self.matching_copies[i+1],
+                    layer_name=f"aux_{i}")
                 losses.update({k + f"_{i}": v for k, v in losses_aux.items()})
 
         # 计算编码器输出的损失 (如果使用两阶段检测):
@@ -434,9 +521,23 @@ class StableHybridSetCriterion(SetCriterion):
             losses_enc = self.calculate_loss(enc_outputs, bin_targets, num_boxes, gt_copy=self.matching_copies[0])
             losses.update({k + f"_enc": v for k, v in losses_enc.items()})
 
+
+        # 计算匹配一致性损失
+        layer_order = []
+        layer_order.extend([f"aux_{i}" for i in range(len(outputs.get("aux_outputs", [])))])
+        layer_order.append("final")
+
+        all_indices = [(name, self._cached_indices[name]) for name in layer_order]
+        consistency_losses = self.compute_all_consistency_losses(all_indices)
+        losses.update(consistency_losses)
+
+        self._cached_indices = {}
+
         return losses
 
-    def calculate_loss(self, outputs, targets, num_boxes, indices=None, gt_copy=1, **kwargs):
+    def calculate_loss(
+            self, outputs, targets, num_boxes,
+            indices=None, gt_copy=1, layer_name=None, **kwargs):
         losses = {}
         # get matching results for each image
         if not indices:
@@ -466,6 +567,11 @@ class StableHybridSetCriterion(SetCriterion):
                 lambda pb, pl, gb, gl: self.matcher(pb, pl, gb, gl, gt_copy=gt_copy),
                 pred_boxes, pred_logits, gt_boxes, gt_labels
             ))
+
+        # 如果提供了layer_name，则缓存匹配结果
+        if layer_name is not None:
+            self._cached_indices[layer_name] = indices
+
         loss_class = self.loss_labels(outputs, targets, num_boxes, indices=indices)
         loss_boxes = self.loss_boxes(outputs, targets, num_boxes, indices=indices)
         losses.update(loss_class)
