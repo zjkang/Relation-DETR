@@ -3,6 +3,7 @@ import math
 
 import torch
 from torch import nn
+import torch.nn.functional as F
 
 from models.bricks.base_transformer import TwostageTransformer
 from models.bricks.basic import MLP
@@ -48,6 +49,8 @@ class DINOTransformer(TwostageTransformer):
         # initiailize encoder and hybrid regression layers
         nn.init.constant_(self.encoder_bbox_head.layers[-1].weight, 0.0)
         nn.init.constant_(self.encoder_bbox_head.layers[-1].bias, 0.0)
+        # (NEW Impl) initialize group centers
+        nn.init.xavier_uniform_(self.group_centers.weight)
 
     def forward(
         self,
@@ -106,6 +109,7 @@ class DINOTransformer(TwostageTransformer):
             level_start_index=level_start_index,
             valid_ratios=valid_ratios,
             attn_mask=attn_mask,
+            group_centers=self.group_centers,
         )
 
         return outputs_classes, outputs_coords, enc_outputs_class, enc_outputs_coord
@@ -152,7 +156,7 @@ class DINOTransformerEncoder(nn.Module):
 
 
 class DINOTransformerDecoder(nn.Module):
-    def __init__(self, decoder_layer, num_layers, num_classes):
+    def __init__(self, decoder_layer, num_layers, num_classes, group_query_interaction):
         super().__init__()
         # parameters
         self.embed_dim = decoder_layer.embed_dim
@@ -170,6 +174,8 @@ class DINOTransformerDecoder(nn.Module):
         self.class_head = nn.ModuleList([copy.deepcopy(class_head) for _ in range(num_layers)])
         self.bbox_head = nn.ModuleList([copy.deepcopy(bbox_head) for _ in range(num_layers)])
         self.norm = nn.LayerNorm(self.embed_dim)
+
+        self.group_query_interaction = group_query_interaction
 
         # self.position_relation_embedding = PositionRelationEmbedding(16, self.num_heads)
         self.init_weights()
@@ -205,6 +211,9 @@ class DINOTransformerDecoder(nn.Module):
 
         pos_relation = attn_mask  # fallback pos_relation to attn_mask
         for layer_idx, layer in enumerate(self.layers):
+            # 1. GroupQueryInteraction
+            query, _ = self.group_query_interaction(query)
+
             reference_points_input = reference_points.detach()[:, :, None] * valid_ratio_scale
             query_sine_embed = get_sine_pos_embed(
                 reference_points_input[:, :, 0, :], self.embed_dim // 2
@@ -252,3 +261,46 @@ class DINOTransformerDecoder(nn.Module):
 
 
 DINOTransformerDecoderLayer = RelationTransformerDecoderLayer
+
+
+
+class GroupQueryInteraction(nn.Module):
+    def __init__(self, d_model, num_groups, num_queries):
+        super().__init__()
+        self.d_model = d_model
+        self.num_groups = num_groups
+        self.num_queries = num_queries
+        # 可学习的group特征中心
+        self.group_centers = nn.Embedding(num_groups, d_model)
+        # 温度参数
+        self.temperature = nn.Parameter(torch.ones(1))
+        # 初始化group centers
+        nn.init.xavier_uniform_(self.group_centers)
+
+    def forward(self, tgt, memory=None, pos=None):
+        """
+        Args:
+            tgt: query特征 [bs, num_queries, d_model]
+            memory: encoder输出 [bs, hw, d_model]
+            pos: 位置编码
+        """
+        bs = tgt.shape[0]
+         # 获取group特征
+        group_features = self.group_centers.weight  # [num_groups, d_model]
+
+        # 1. Group-Query交互
+        # 计算query与group的相似度
+        similarity = torch.matmul(tgt, group_features.transpose(-2, -1))
+        # [bs, num_queries, num_groups]
+
+        # 生成软分配权重
+        group_weights = F.softmax(similarity / self.temperature, dim=-1)
+
+        # group特征增强
+        group_features = torch.matmul(group_weights, self.group_centers)
+        # [bs, num_queries, d_model]
+
+        # 残差连接
+        enhanced_tgt = tgt + group_features
+
+        return enhanced_tgt, group_weights
