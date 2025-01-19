@@ -49,8 +49,6 @@ class DINOTransformer(TwostageTransformer):
         # initiailize encoder and hybrid regression layers
         nn.init.constant_(self.encoder_bbox_head.layers[-1].weight, 0.0)
         nn.init.constant_(self.encoder_bbox_head.layers[-1].bias, 0.0)
-        # (NEW Impl) initialize group centers
-        nn.init.xavier_uniform_(self.group_centers.weight)
 
     def forward(
         self,
@@ -109,7 +107,6 @@ class DINOTransformer(TwostageTransformer):
             level_start_index=level_start_index,
             valid_ratios=valid_ratios,
             attn_mask=attn_mask,
-            group_centers=self.group_centers,
         )
 
         return outputs_classes, outputs_coords, enc_outputs_class, enc_outputs_coord
