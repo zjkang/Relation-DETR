@@ -261,43 +261,42 @@ DINOTransformerDecoderLayer = RelationTransformerDecoderLayer
 
 
 
-class GroupQueryInteraction(nn.Module):
-    def __init__(self, d_model, num_queries, num_groups=300):
+class GroupGuidedDecoder(nn.Module):
+    def __init__(self, d_model, num_specialized_queries, num_queries):
         super().__init__()
         self.d_model = d_model
-        self.num_groups = num_groups
+        self.num_specialized = num_specialized_queries
         self.num_queries = num_queries
-        # 可学习的group特征中心
-        self.group_centers = nn.Embedding(num_groups, d_model)
-        # 温度参数
-        self.temperature = nn.Parameter(torch.ones(1))
-        # 初始化group centers
-        nn.init.xavier_uniform_(self.group_centers.weight)
 
-    def forward(self, tgt, memory=None, pos=None):
-        """
-        Args:
-            tgt: query特征 [bs, num_queries, d_model]
-            memory: encoder输出 [bs, hw, d_model]
-            pos: 位置编码
-        """
-        bs = tgt.shape[0]
-         # 获取group特征
-        group_features = self.group_centers.weight  # [num_groups, d_model]
+        # 专门化query模板
+        self.specialized_queries = nn.Embedding(num_specialized_queries, d_model)
 
-        # 1. Group-Query交互
-        # 计算query与group的相似度
-        similarity = torch.matmul(tgt, group_features.transpose(-2, -1))
-        # [bs, num_queries, num_groups]
+        # 从图像特征学习权重的网络
+        self.weight_generator = nn.Sequential(
+            nn.Linear(d_model, d_model),
+            nn.LayerNorm(d_model),
+            nn.ReLU(),
+            nn.Linear(d_model, num_queries * num_specialized_queries)
+        )
 
-        # 生成软分配权重
-        group_weights = F.softmax(similarity / self.temperature, dim=-1)
+    def forward(self, tgt, memory, pos=None):
+        bs = memory.shape[0]
 
-        # group特征增强
-        group_features = torch.matmul(group_weights, self.group_centers.weight)
-        # [bs, num_queries, d_model]
+        # 1. 从图像特征生成权重矩阵
+        image_feat = memory.mean(dim=1)  # [bs, d_model]
+        combination_weights = self.weight_generator(image_feat)
+        combination_weights = combination_weights.view(
+            bs, self.num_queries, self.num_specialized
+        )  # [bs, num_queries, num_specialized]
 
-        # 残差连接
-        enhanced_tgt = tgt + group_features
+        # 2. 权重归一化
+        combination_weights = F.softmax(combination_weights, dim=-1)
 
-        return enhanced_tgt, group_weights
+        # 3. 生成enhanced queries
+        specialized_bases = self.specialized_queries.weight  # [num_specialized, d_model]
+        enhanced_features = torch.matmul(combination_weights, specialized_bases)
+
+        # 4. 残差连接
+        enhanced_tgt = tgt + enhanced_features
+
+        return enhanced_tgt, combination_weights
