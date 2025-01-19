@@ -209,7 +209,7 @@ class DINOTransformerDecoder(nn.Module):
         pos_relation = attn_mask  # fallback pos_relation to attn_mask
         for layer_idx, layer in enumerate(self.layers):
             # 1. GroupQueryInteraction
-            query, _ = self.group_query_interaction(query)
+            query, _ = self.group_query_interaction(query, value)
 
             reference_points_input = reference_points.detach()[:, :, None] * valid_ratio_scale
             query_sine_embed = get_sine_pos_embed(
@@ -261,42 +261,49 @@ DINOTransformerDecoderLayer = RelationTransformerDecoderLayer
 
 
 
-class GroupGuidedDecoder(nn.Module):
-    def __init__(self, d_model, num_specialized_queries, num_queries):
+class GroupQueryInteraction(nn.Module):
+    def __init__(self, d_model, num_queries, num_groups=300):
         super().__init__()
         self.d_model = d_model
-        self.num_specialized = num_specialized_queries
+        self.num_specialized = num_groups
         self.num_queries = num_queries
 
         # 专门化query模板
-        self.specialized_queries = nn.Embedding(num_specialized_queries, d_model)
+        self.specialized_queries = nn.Embedding(num_groups, d_model)
 
-        # 从图像特征学习权重的网络
-        self.weight_generator = nn.Sequential(
-            nn.Linear(d_model, d_model),
-            nn.LayerNorm(d_model),
+        # 简化的特征处理器
+        self.img_feature_pooling = nn.Sequential(
+            nn.Linear(d_model, 256),
             nn.ReLU(),
-            nn.Linear(d_model, num_queries * num_specialized_queries)
+            nn.Linear(256, d_model)
+        )
+        
+        # 权重生成器
+        self.weight_generator = nn.Sequential(
+            nn.Linear(d_model * 2, 256),  # 拼接query和pooled image features
+            nn.ReLU(),
+            nn.Linear(256, num_groups)
         )
 
     def forward(self, tgt, memory, pos=None):
-        bs = memory.shape[0]
+        batch_size, num_queries, _ = tgt.shape
 
         # 1. 从图像特征生成权重矩阵
         image_feat = memory.mean(dim=1)  # [bs, d_model]
-        combination_weights = self.weight_generator(image_feat)
-        combination_weights = combination_weights.view(
-            bs, self.num_queries, self.num_specialized
-        )  # [bs, num_queries, num_specialized]
+        image_feat = self.img_feature_pooling(image_feat)
+        image_feat = image_feat.unsqueeze(1).expand(-1, num_queries, -1)  # [bs, num_queries, d_model]
 
-        # 2. 权重归一化
-        combination_weights = F.softmax(combination_weights, dim=-1)
+        # 拼接查询和图像特征
+        combined_features = torch.cat([tgt, image_feat], dim=-1) # [bs, num_queries, d_model*2]
+        
+        # 生成组权重
+        group_weights = self.weight_generator(combined_features)  # [bs, num_queries, num_groups]
+        group_weights = F.softmax(group_weights, dim=-1)
+        
+        # 使用权重组合组特征
+        group_features = torch.matmul(group_weights, self.specialized_queries.weight)  # [bs, num_queries, d_model]
+        
+        # 残差连接
+        enhanced_tgt = tgt + group_features
 
-        # 3. 生成enhanced queries
-        specialized_bases = self.specialized_queries.weight  # [num_specialized, d_model]
-        enhanced_features = torch.matmul(combination_weights, specialized_bases)
-
-        # 4. 残差连接
-        enhanced_tgt = tgt + enhanced_features
-
-        return enhanced_tgt, combination_weights
+        return enhanced_tgt, group_weights
