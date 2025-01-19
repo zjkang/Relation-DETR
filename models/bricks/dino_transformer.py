@@ -262,7 +262,7 @@ DINOTransformerDecoderLayer = RelationTransformerDecoderLayer
 
 
 class GroupQueryInteraction(nn.Module):
-    def __init__(self, d_model, num_groups, num_queries):
+    def __init__(self, d_model, num_queries, num_groups=300):
         super().__init__()
         self.d_model = d_model
         self.num_groups = num_groups
@@ -272,7 +272,7 @@ class GroupQueryInteraction(nn.Module):
         # 温度参数
         self.temperature = nn.Parameter(torch.ones(1))
         # 初始化group centers
-        nn.init.xavier_uniform_(self.group_centers)
+        nn.init.xavier_uniform_(self.group_centers.weight)
 
     def forward(self, tgt, memory=None, pos=None):
         """
@@ -294,7 +294,7 @@ class GroupQueryInteraction(nn.Module):
         group_weights = F.softmax(similarity / self.temperature, dim=-1)
 
         # group特征增强
-        group_features = torch.matmul(group_weights, self.group_centers)
+        group_features = torch.matmul(group_weights, self.group_centers.weight)
         # [bs, num_queries, d_model]
 
         # 残差连接
