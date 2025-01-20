@@ -118,6 +118,8 @@ class DINOTransformer(TwostageTransformer):
 
         return outputs_classes, outputs_coords, enc_outputs_class, enc_outputs_coord
 
+    def compute_diversity_loss(self):
+        return self.group_query_interaction.compute_diversity_loss()
 
 DINOTransformerEncoderLayer = RelationTransformerEncoderLayer
 
@@ -306,6 +308,25 @@ class GroupQueryInteraction(nn.Module):
 
         return enahcned_queries, weights
 
+    def compute_diversity_loss(self):
+        # 计算specialized queries之间的相似度
+        queries = F.normalize(self.specialized_queries.weight, dim=-1)  # 归一化
+        # 计算余弦相似度
+        similarity = F.cosine_similarity(
+            queries.unsqueeze(1),  # [num_groups, 1, d_model]
+            queries.unsqueeze(0),  # [1, num_groups, d_model]
+            dim=-1
+        )
+
+        # 移除对角线上的自相似度
+        mask = torch.eye(self.num_specialized, device=queries.device)
+        similarity = similarity * (1 - mask)
+
+        # 计算diversity loss
+        diversity_loss = similarity.sum() / (self.num_specialized * (self.num_specialized - 1))
+        return diversity_loss
+
+
 # # 可选：添加diversity loss鼓励不同query的注意力模式不同
 # def diversity_loss(self, attn_weights):
 #     similarity = torch.matmul(attn_weights, attn_weights.transpose(-2, -1))
@@ -315,3 +336,6 @@ class GroupQueryInteraction(nn.Module):
 # # 可选：添加sparsity约束
 # def sparsity_constraint(self, combination_weights):
 #     return torch.norm(combination_weights, p=1)
+
+# 正交约束
+# 对比学习

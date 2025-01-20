@@ -86,6 +86,7 @@ weight_dict.update({
     for k, v in weight_dict.items()
 })
 weight_dict.update({"loss_class_enc": 1, "loss_bbox_enc": 5, "loss_giou_enc": 2})
+weight_dict.update({"diversity_loss": 0.1})
 
 # criterion = SetCriterion(num_classes, matcher=matcher, weight_dict=weight_dict, alpha=0.25, gamma=2.0)
 # criterion = StableSetCriterion(num_classes, matcher=matcher, weight_dict=weight_dict, alpha=0.25, gamma=2.0)

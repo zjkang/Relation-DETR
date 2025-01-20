@@ -104,6 +104,9 @@ class DINO(DNDETRDetector):
             dn_losses = self.compute_dn_loss(dn_metas, targets)
             loss_dict.update(dn_losses)
 
+            diversity_loss = self.transformer.compute_diversity_loss()
+            loss_dict.update({"diversity_loss": diversity_loss})
+
             # loss reweighting
             weight_dict = self.criterion.weight_dict
             loss_dict = dict((k, loss_dict[k] * weight_dict[k])
