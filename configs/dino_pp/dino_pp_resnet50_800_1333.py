@@ -65,11 +65,11 @@ transformer = DINOTransformer(
         ),
         num_layers=transformer_dec_layers,
         num_classes=num_classes,
-        group_query_interaction=GroupQueryInteraction(embed_dim, num_queries, num_groups=300),
     ),
     num_classes=num_classes,
     num_feature_levels=num_feature_levels,
     two_stage_num_proposals=num_queries,
+    group_query_interaction=GroupQueryInteraction(embed_dim, num_queries, num_groups=300),
 )
 
 # num_groups: int = 5

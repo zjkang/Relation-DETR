@@ -24,6 +24,7 @@ class DINOTransformer(TwostageTransformer):
         num_classes: int,
         num_feature_levels: int = 4,
         two_stage_num_proposals: int = 900,
+        group_query_interaction: nn.Module = None,
     ):
         super().__init__(num_feature_levels, encoder.embed_dim)
         # model parameters
@@ -33,7 +34,10 @@ class DINOTransformer(TwostageTransformer):
         # model structure
         self.encoder = encoder
         self.decoder = decoder
-        self.tgt_embed = nn.Embedding(two_stage_num_proposals, self.embed_dim)
+
+        self.group_query_interaction = group_query_interaction
+        # self.tgt_embed = nn.Embedding(two_stage_num_proposals, self.embed_dim)
+
         self.encoder_class_head = nn.Linear(self.embed_dim, num_classes)
         self.encoder_bbox_head = MLP(self.embed_dim, self.embed_dim, 4, 3)
 
@@ -41,7 +45,7 @@ class DINOTransformer(TwostageTransformer):
 
     def init_weights(self):
         # initialize embedding layers
-        nn.init.normal_(self.tgt_embed.weight)
+        # nn.init.normal_(self.tgt_embed.weight)
         # initilize encoder and hybrid classification layers
         prior_prob = 0.01
         bias_value = -math.log((1 - prior_prob) / prior_prob)
@@ -90,7 +94,10 @@ class DINOTransformer(TwostageTransformer):
 
         # get target and reference points
         reference_points = enc_outputs_coord.detach()
-        target = self.tgt_embed.weight.expand(multi_level_feats[0].shape[0], -1, -1)
+
+        tgt_embed, group_weights = self.group_query_interaction(memory)
+        target = tgt_embed.weight.expand(multi_level_feats[0].shape[0], -1, -1)
+        # target = self.tgt_embed.weight.expand(multi_level_feats[0].shape[0], -1, -1)
 
         # combine with noised_label_query and noised_box_query for denoising training
         if noised_label_query is not None and noised_box_query is not None:
@@ -153,7 +160,7 @@ class DINOTransformerEncoder(nn.Module):
 
 
 class DINOTransformerDecoder(nn.Module):
-    def __init__(self, decoder_layer, num_layers, num_classes, group_query_interaction):
+    def __init__(self, decoder_layer, num_layers, num_classes):
         super().__init__()
         # parameters
         self.embed_dim = decoder_layer.embed_dim
@@ -171,8 +178,6 @@ class DINOTransformerDecoder(nn.Module):
         self.class_head = nn.ModuleList([copy.deepcopy(class_head) for _ in range(num_layers)])
         self.bbox_head = nn.ModuleList([copy.deepcopy(bbox_head) for _ in range(num_layers)])
         self.norm = nn.LayerNorm(self.embed_dim)
-
-        self.group_query_interaction = group_query_interaction
 
         # self.position_relation_embedding = PositionRelationEmbedding(16, self.num_heads)
         self.init_weights()
@@ -208,9 +213,6 @@ class DINOTransformerDecoder(nn.Module):
 
         pos_relation = attn_mask  # fallback pos_relation to attn_mask
         for layer_idx, layer in enumerate(self.layers):
-            # 1. GroupQueryInteraction
-            query, _ = self.group_query_interaction(query, value)
-
             reference_points_input = reference_points.detach()[:, :, None] * valid_ratio_scale
             query_sine_embed = get_sine_pos_embed(
                 reference_points_input[:, :, 0, :], self.embed_dim // 2
@@ -277,33 +279,39 @@ class GroupQueryInteraction(nn.Module):
             nn.ReLU(),
             nn.Linear(256, d_model)
         )
-        
-        # 权重生成器
+
+        # 从图像特征生成权重的网络
         self.weight_generator = nn.Sequential(
-            nn.Linear(d_model * 2, 256),  # 拼接query和pooled image features
+            nn.Linear(d_model, d_model),
+            nn.LayerNorm(d_model),
             nn.ReLU(),
-            nn.Linear(256, num_groups)
+            nn.Linear(d_model, self.num_queries * self.specialized_queries)
         )
 
-    def forward(self, tgt, memory, pos=None):
-        batch_size, num_queries, _ = tgt.shape
+        nn.init.normal_(self.specialized_queries.weight)
 
+    def forward(self, memory, pos=None):
+        bs = memory.shape[0]
         # 1. 从图像特征生成权重矩阵
         image_feat = memory.mean(dim=1)  # [bs, d_model]
         image_feat = self.img_feature_pooling(image_feat)
-        image_feat = image_feat.unsqueeze(1).expand(-1, num_queries, -1)  # [bs, num_queries, d_model]
 
-        # 拼接查询和图像特征
-        combined_features = torch.cat([tgt, image_feat], dim=-1) # [bs, num_queries, d_model*2]
-        
-        # 生成组权重
-        group_weights = self.weight_generator(combined_features)  # [bs, num_queries, num_groups]
-        group_weights = F.softmax(group_weights, dim=-1)
-        
+        # 2. 生成组合权重
+        weights = self.weight_generator(image_feat)
+        weights = weights.view(bs, self.num_queries, self.num_specialized)
+        weights = F.softmax(weights, dim=-1)
+
         # 使用权重组合组特征
-        group_features = torch.matmul(group_weights, self.specialized_queries.weight)  # [bs, num_queries, d_model]
-        
-        # 残差连接
-        enhanced_tgt = tgt + group_features
+        enahcned_queries = torch.matmul(weights, self.specialized_queries.weight)  # [bs, num_queries, d_model]
 
-        return enhanced_tgt, group_weights
+        return enahcned_queries, weights
+
+# # 可选：添加diversity loss鼓励不同query的注意力模式不同
+# def diversity_loss(self, attn_weights):
+#     similarity = torch.matmul(attn_weights, attn_weights.transpose(-2, -1))
+#     diversity_loss = torch.triu(similarity, diagonal=1).sum()
+#     return diversity_loss
+
+# # 可选：添加sparsity约束
+# def sparsity_constraint(self, combination_weights):
+#     return torch.norm(combination_weights, p=1)
