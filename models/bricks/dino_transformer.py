@@ -96,7 +96,7 @@ class DINOTransformer(TwostageTransformer):
         reference_points = enc_outputs_coord.detach()
 
         tgt_embed, group_weights = self.group_query_interaction(memory)
-        target = tgt_embed.weight.expand(multi_level_feats[0].shape[0], -1, -1)
+        target = tgt_embed.expand(multi_level_feats[0].shape[0], -1, -1)
         # target = self.tgt_embed.weight.expand(multi_level_feats[0].shape[0], -1, -1)
 
         # combine with noised_label_query and noised_box_query for denoising training
@@ -285,7 +285,7 @@ class GroupQueryInteraction(nn.Module):
             nn.Linear(d_model, d_model),
             nn.LayerNorm(d_model),
             nn.ReLU(),
-            nn.Linear(d_model, self.num_queries * self.specialized_queries)
+            nn.Linear(d_model, self.num_queries * self.num_specialized)
         )
 
         nn.init.normal_(self.specialized_queries.weight)
