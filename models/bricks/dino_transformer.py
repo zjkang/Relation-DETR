@@ -320,22 +320,28 @@ class GroupQueryInteraction(nn.Module):
         # 400.0: initial value 2.0 testing
         # 600.0: initial value 3.0
         # 1000.0: inital value 5.0
-        scale_factor = 400.0
+        scale_factor = 600.0
         # 移除对角线上的自相似度
         mask = torch.eye(self.num_specialized, device=queries.device)
         similarity = similarity * (1 - mask)
+        diversity_loss = scale_factor * similarity.abs().sum() / (self.num_specialized * (self.num_specialized - 1))
 
         # only loss consider similarity > 0.5
-        threshold = 0.5
-        high_similarity = F.relu(similarity - threshold)
-        diversity_loss = scale_factor * high_similarity.sum() / (self.num_specialized * (self.num_specialized - 1))
+        # threshold = 0.5
+        # high_similarity = F.relu(similarity - threshold)
+        # diversity_loss = scale_factor * high_similarity.sum() / (self.num_specialized * (self.num_specialized - 1))
 
-        # L1稀疏正则化
-        l1_loss = group_weights.abs().sum(dim=-1).mean()
+        # 计算concentration loss：鼓励每个查询更加专注于特定的组
+        # concentration_loss = -(group_weights.max(dim=-1)[0]).mean()
+        # 方案1：Top-k稀疏性损失
+        num_specialized = group_weights.shape[-1]
+        k = int(num_specialized * 0.3)  # 期望的活跃组数
+        top_k_weights, _ = torch.topk(group_weights, k, dim=-1)  # 获取前k个最大权重
+        sparsity_loss = (1 - top_k_weights.sum(dim=-1)).mean()  # 鼓励top-k权重之和接近1
 
         loss_dict = {
             "loss_spec_diversity": diversity_loss,
-            "loss_spec_l1": l1_loss
+            "loss_spec_l1": 10 * sparsity_loss
         }
         return loss_dict
 
