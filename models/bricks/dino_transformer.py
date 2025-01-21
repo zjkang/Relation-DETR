@@ -95,7 +95,7 @@ class DINOTransformer(TwostageTransformer):
         # get target and reference points
         reference_points = enc_outputs_coord.detach()
 
-        tgt_embed, group_weights = self.group_query_interaction(memory)
+        tgt_embed, group_outputs_weights = self.group_query_interaction(memory)
         target = tgt_embed.expand(multi_level_feats[0].shape[0], -1, -1)
         # target = self.tgt_embed.weight.expand(multi_level_feats[0].shape[0], -1, -1)
 
@@ -116,10 +116,10 @@ class DINOTransformer(TwostageTransformer):
             attn_mask=attn_mask,
         )
 
-        return outputs_classes, outputs_coords, enc_outputs_class, enc_outputs_coord
+        return outputs_classes, outputs_coords, enc_outputs_class, enc_outputs_coord, group_outputs_weights
 
-    def compute_diversity_loss(self):
-        return self.group_query_interaction.compute_diversity_loss()
+    def compute_spec_losses(self, group_weights):
+        return self.group_query_interaction.compute_spec_losses(group_weights)
 
 DINOTransformerEncoderLayer = RelationTransformerEncoderLayer
 
@@ -308,7 +308,7 @@ class GroupQueryInteraction(nn.Module):
 
         return enahcned_queries, weights
 
-    def compute_diversity_loss(self):
+    def compute_spec_losses(self, group_weights):
         # 计算specialized queries之间的相似度
         queries = F.normalize(self.specialized_queries.weight, dim=-1)  # 归一化
         # 计算余弦相似度
@@ -317,15 +317,27 @@ class GroupQueryInteraction(nn.Module):
             queries.unsqueeze(0),  # [1, num_groups, d_model]
             dim=-1
         )
+        # 400.0: initial value 2.0 testing
+        # 600.0: initial value 3.0
+        # 1000.0: inital value 5.0
         scale_factor = 400.0
-
         # 移除对角线上的自相似度
         mask = torch.eye(self.num_specialized, device=queries.device)
         similarity = similarity * (1 - mask)
 
-        # 计算diversity loss
-        diversity_loss = scale_factor * (similarity.abs()).sum() / (self.num_specialized * (self.num_specialized - 1))
-        return diversity_loss
+        # only loss consider similarity > 0.5
+        threshold = 0.5
+        high_similarity = F.relu(similarity - threshold)
+        diversity_loss = scale_factor * high_similarity.sum() / (self.num_specialized * (self.num_specialized - 1))
+
+        # L1稀疏正则化
+        l1_loss = group_weights.abs().sum(dim=-1).mean()
+
+        loss_dict = {
+            "loss_spec_diversity": diversity_loss,
+            "loss_spec_l1": l1_loss
+        }
+        return loss_dict
 
 
 # # 可选：添加diversity loss鼓励不同query的注意力模式不同

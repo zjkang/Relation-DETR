@@ -5,6 +5,20 @@ from torch import Tensor, nn
 from models.bricks.denoising import GenerateCDNQueries
 from models.detectors.base_detector import DNDETRDetector
 
+def monitor_pattern_usage(self, weights):
+    with torch.no_grad():
+        # 统计每个specialized query的使用频率
+        usage = (weights > 0.1).float().sum(dim=[0,1])  # [num_specialized]
+
+        # 检查是否有未被充分使用的patterns
+        inactive_patterns = (usage < weights.size(1) * 0.01).sum()
+        print(f"Inactive patterns: {inactive_patterns}")
+
+        # 检查最常用的patterns
+        top_k = 10
+        top_patterns = usage.topk(top_k)
+        print(f"Top {top_k} used patterns: {top_patterns.indices.tolist()}")
+
 
 class DINO(DNDETRDetector):
     def __init__(
@@ -72,7 +86,7 @@ class DINO(DNDETRDetector):
             max_gt_num_per_image = None
 
         # feed into transformer
-        outputs_class, outputs_coord, enc_class, enc_coord = self.transformer(
+        outputs_class, outputs_coord, enc_class, enc_coord, group_outputs_weights = self.transformer(
             multi_level_feats,
             multi_level_masks,
             multi_level_pos_embeds,
@@ -103,9 +117,9 @@ class DINO(DNDETRDetector):
             loss_dict = self.criterion(output, targets)
             dn_losses = self.compute_dn_loss(dn_metas, targets)
             loss_dict.update(dn_losses)
-
-            diversity_loss = self.transformer.compute_diversity_loss()
-            loss_dict.update({"diversity_loss": diversity_loss})
+            # compute spec loss
+            spec_losses = self.transformer.compute_spec_losses(group_outputs_weights)
+            loss_dict.update(spec_losses)
 
             # loss reweighting
             weight_dict = self.criterion.weight_dict
