@@ -317,13 +317,14 @@ class GroupQueryInteraction(nn.Module):
             queries.unsqueeze(0),  # [1, num_groups, d_model]
             dim=-1
         )
+        scale_factor = 400.0
 
         # 移除对角线上的自相似度
         mask = torch.eye(self.num_specialized, device=queries.device)
         similarity = similarity * (1 - mask)
 
         # 计算diversity loss
-        diversity_loss = similarity.sum() / (self.num_specialized * (self.num_specialized - 1))
+        diversity_loss = scale_factor * (similarity.abs()).sum() / (self.num_specialized * (self.num_specialized - 1))
         return diversity_loss
 
 
