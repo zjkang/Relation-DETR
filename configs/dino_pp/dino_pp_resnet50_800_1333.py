@@ -77,7 +77,7 @@ transformer = DINOTransformer(
 #     cost_class=2, cost_bbox=5, cost_giou=2, focal_alpha=0.25, focal_gamma=2.0, stability_weight=0.2)
 
 matcher = StableHungarianMatcher(cost_class=2, cost_bbox=5, cost_giou=2,
-                                 focal_alpha=0.25, focal_gamma=2.0, mixed_match=True, debug=True)
+                                 focal_alpha=0.25, focal_gamma=2.0, mixed_match=True, debug=False)
 
 weight_dict = {"loss_class": 1, "loss_bbox": 5, "loss_giou": 2}
 weight_dict.update({"loss_class_dn": 1, "loss_bbox_dn": 5, "loss_giou_dn": 2})
