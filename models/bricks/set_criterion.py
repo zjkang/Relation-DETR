@@ -376,7 +376,7 @@ class StableHybridSetCriterion(SetCriterion):
         alpha: float = 0.25,
         gamma: float = 2.0,
         two_stage_binary_cls=False,
-        matching_copies=[2,2,2,2,2,2,1]
+        matching_copies=[(2,4),(2,4),(2,4),(2,4),(2,4),(2,4),(1,1)]
     ):
         """
         Args:
@@ -436,7 +436,7 @@ class StableHybridSetCriterion(SetCriterion):
 
         return losses
 
-    def calculate_loss(self, outputs, targets, num_boxes, indices=None, gt_copy=1, **kwargs):
+    def calculate_loss(self, outputs, targets, num_boxes, indices=None, gt_copy=(1,1), **kwargs):
         losses = {}
         # get matching results for each image
         if not indices:
@@ -463,7 +463,7 @@ class StableHybridSetCriterion(SetCriterion):
             # ]
             # indices = list(map(self.matcher, pred_boxes, pred_logits, gt_boxes, gt_labels, gt_copy))
             indices = list(map(
-                lambda pb, pl, gb, gl: self.matcher(pb, pl, gb, gl, gt_copy=gt_copy),
+                lambda pb, pl, gb, gl: self.matcher(pb, pl, gb, gl, gt_copy=gt_copy[0], k=gt_copy[1]),
                 pred_boxes, pred_logits, gt_boxes, gt_labels
             ))
         loss_class = self.loss_labels(outputs, targets, num_boxes, indices=indices)
