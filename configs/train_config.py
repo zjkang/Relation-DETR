@@ -19,25 +19,25 @@ find_unused_parameters = False  # useful for debugging distributed training
 # define dataset for train
 coco_path = "../autodl-tmp/data/COCO2017"  # /PATH/TO/YOUR/COCODIR
 train_dataset = CocoDetection(
-    img_folder=f"{coco_path}/train2017",
-    ann_file=f"{coco_path}/annotations/images/instances_train2017.json",
+    img_folder=f"{coco_path}/images/train2017",
+    ann_file=f"{coco_path}/annotations/instances_train2017.json",
     transforms=presets.detr,  # see transforms/presets to choose a transform
     train=True,
 )
 test_dataset = CocoDetection(
-    img_folder=f"{coco_path}/val2017",
-    ann_file=f"{coco_path}/annotations/images/instances_val2017.json",
+    img_folder=f"{coco_path}/images/val2017",
+    ann_file=f"{coco_path}/annotations/instances_val2017.json",
     transforms=None,  # the eval_transform is integrated in the model
 )
 
 # model config to train
-# model_path = "configs/dab_/relation_detr_resnet50_800_1333.py"
-model_path = "configs/dab_def_detr_pp/dab_def_detr_pp_resnet50_800_1333.py" #dab_def_detr_pp
+# model_path = "configs/relation_detr/relation_detr_resnet50_800_1333.py"
+model_path = "configs/dab_def_detr_pp/dab_def_detr_pp_resnet50_800_1333.py"
 
 # specify a checkpoint folder to resume, or a pretrained ".pth" to finetune, for example:
 # checkpoints/relation_detr_resnet50_800_1333/train/2024-03-22-09_38_50
 # checkpoints/relation_detr_resnet50_800_1333/train/2024-03-22-09_38_50/best_ap.pth
-resume_from_checkpoint = None
+resume_from_checkpoint = None#'checkpoints/dino_pp_resnet50_800_1333/train/2025-01-07-01_31_30'
 
 learning_rate = 1e-4  # initial learning rate
 optimizer = optim.AdamW(lr=learning_rate, weight_decay=1e-4, betas=(0.9, 0.999))
