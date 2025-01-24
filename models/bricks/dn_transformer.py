@@ -120,7 +120,7 @@ class DNTransformerDecoder(nn.Module):
         self.class_head = nn.ModuleList([copy.deepcopy(class_head) for _ in range(num_layers)])
         self.bbox_head = nn.ModuleList([copy.deepcopy(bbox_head) for _ in range(num_layers)])
 
-        self.position_relation_embedding = PositionRelationEmbedding(16, self.num_heads)
+        # self.position_relation_embedding = PositionRelationEmbedding(16, self.num_heads)
 
         self.init_weights()
 
@@ -183,12 +183,12 @@ class DNTransformerDecoder(nn.Module):
             if layer_idx == self.num_layers - 1:
                 break
 
-            # NOTE: Here we integrate position_relation_embedding into DN-Deformable-DETR
-            src_boxes = tgt_boxes if layer_idx >= 1 else reference_points
-            tgt_boxes = output_coord
-            pos_relation = self.position_relation_embedding(src_boxes, tgt_boxes).flatten(0, 1)
-            if attn_mask is not None:
-                pos_relation.masked_fill_(attn_mask, float("-inf"))
+            # # NOTE: Here we integrate position_relation_embedding into DN-Deformable-DETR
+            # src_boxes = tgt_boxes if layer_idx >= 1 else reference_points
+            # tgt_boxes = output_coord
+            # pos_relation = self.position_relation_embedding(src_boxes, tgt_boxes).flatten(0, 1)
+            # if attn_mask is not None:
+            #     pos_relation.masked_fill_(attn_mask, float("-inf"))
 
             # iterative bounding box refinement, reference_points are detached!
             reference_points = output_coord.detach()
