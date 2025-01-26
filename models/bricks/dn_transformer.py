@@ -24,6 +24,7 @@ class DNTransformer(MultiLevelTransformer):
         num_classes: int,
         num_feature_levels: int = 4,
         two_stage_num_proposals: int = 300,
+        group_query_interaction: nn.Module = None, #zz
     ):
         super().__init__(num_feature_levels, encoder.embed_dim)
         # model parameters
@@ -33,16 +34,17 @@ class DNTransformer(MultiLevelTransformer):
         # model structure
         self.encoder = encoder
         self.decoder = decoder
-        self.tgt_embed = nn.Embedding(
-            two_stage_num_proposals, self.embed_dim - 1
-        )  # leave the last column for indicator
+        self.group_query_interaction = group_query_interaction #zz
+        # self.tgt_embed = nn.Embedding(
+        #     two_stage_num_proposals, self.embed_dim - 1
+        # )  # leave the last column for indicator
         self.refpoint_embed = nn.Embedding(two_stage_num_proposals, 4)
 
         self.init_weights()
 
     def init_weights(self):
         # initialize embedding layers
-        nn.init.zeros_(self.tgt_embed.weight)
+        # nn.init.zeros_(self.tgt_embed.weight)
         nn.init.uniform_(self.refpoint_embed.weight)
         ref_embed = inverse_sigmoid(self.refpoint_embed.weight.data[:]).clamp(-3, 3)
         self.refpoint_embed.weight.data[:] = ref_embed
@@ -75,9 +77,11 @@ class DNTransformer(MultiLevelTransformer):
         )
 
         # get target and reference points
-        indicator_for_matching_part = memory.new_zeros([self.two_stage_num_proposals, 1])
-        target = torch.cat([self.tgt_embed.weight, indicator_for_matching_part], 1)
-        target = target.expand(multi_level_feats[0].shape[0], -1, -1)
+        # indicator_for_matching_part = memory.new_zeros([self.two_stage_num_proposals, 1])
+        # target = torch.cat([self.tgt_embed.weight, indicator_for_matching_part], 1)
+        # target = target.expand(multi_level_feats[0].shape[0], -1, -1)
+        tgt_embed, group_outputs_weights = self.group_query_interaction(memory) #zz
+        target = tgt_embed.expand(multi_level_feats[0].shape[0], -1, -1) #zz
         reference_points = self.refpoint_embed.weight.expand(multi_level_feats[0].shape[0], -1, -1)
         reference_points = reference_points.sigmoid()
 
@@ -97,7 +101,11 @@ class DNTransformer(MultiLevelTransformer):
             attn_mask=attn_mask,
         )
 
-        return outputs_classes, outputs_coords
+        return outputs_classes, outputs_coords, group_outputs_weights #zz
+
+    def compute_spec_losses(self, group_weights):
+        return self.group_query_interaction.compute_spec_losses(group_weights)
+
 
 
 class DNTransformerDecoder(nn.Module):

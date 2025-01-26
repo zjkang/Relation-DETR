@@ -96,6 +96,10 @@ class DabTransformer(TwostageTransformer):
 
         return outputs_classes, outputs_coords, enc_outputs_class, enc_outputs_coord, group_outputs_weights
 
+    # zz
+    def compute_spec_losses(self, group_weights):
+        return self.group_query_interaction.compute_spec_losses(group_weights)
+
 
 DabTransformerEncoderLayer = RelationTransformerEncoderLayer
 DabTransformerEncoder = DINOTransformerEncoder

@@ -117,7 +117,7 @@ class DINO(DNDETRDetector):
             loss_dict = self.criterion(output, targets)
             dn_losses = self.compute_dn_loss(dn_metas, targets)
             loss_dict.update(dn_losses)
-            # compute spec loss
+            # compute spec loss zz
             spec_losses = self.transformer.compute_spec_losses(group_outputs_weights)
             loss_dict.update(spec_losses)
 

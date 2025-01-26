@@ -74,7 +74,7 @@ class DNDeformableDETR(DNDETRDetector):
             max_gt_num_per_image = None
 
         # feed into transformer
-        outputs_class, outputs_coord = self.transformer(
+        outputs_class, outputs_coord, group_outputs_weights = self.transformer(
             multi_level_feats,
             multi_level_masks,
             multi_level_pos_embeds,
@@ -107,6 +107,9 @@ class DNDeformableDETR(DNDETRDetector):
             # denoising training loss
             dn_losses = self.compute_dn_loss(dn_metas, targets)
             loss_dict.update(dn_losses)
+            # compute spec loss zz
+            spec_losses = self.transformer.compute_spec_losses(group_outputs_weights)
+            loss_dict.update(spec_losses)
 
             # loss reweighting
             weight_dict = self.criterion.weight_dict

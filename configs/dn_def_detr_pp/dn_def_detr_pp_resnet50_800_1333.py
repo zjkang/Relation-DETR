@@ -69,6 +69,7 @@ transformer = DNTransformer(
         ),
         num_layers=transformer_dec_layers,
         num_classes=num_classes,
+        group_query_interaction=GroupQueryInteraction(embed_dim, num_queries, num_groups=100),#zz
     ),
     num_classes=num_classes,
     num_feature_levels=num_feature_levels,
@@ -84,9 +85,14 @@ weight_dict = {"loss_class": 1, "loss_bbox": 5, "loss_giou": 2}
 weight_dict.update({"loss_class_dn": 1, "loss_bbox_dn": 5, "loss_giou_dn": 2})
 for i in range(transformer.decoder.num_layers - 1):
     weight_dict.update({k + f"_{i}": v for k, v in weight_dict.items()})
-criterion = SetCriterion(
-    num_classes=num_classes, matcher=matcher, weight_dict=weight_dict, alpha=0.25, gamma=2.0
-)
+weight_dict.update({"loss_spec_diversity": 0.2, "loss_spec_l1": 0.1}) #zz
+
+# criterion = SetCriterion(
+#     num_classes=num_classes, matcher=matcher, weight_dict=weight_dict, alpha=0.25, gamma=2.0
+# )
+criterion = StableHybridSetCriterion(
+    num_classes, matcher=matcher, weight_dict=weight_dict, alpha=0.25, gamma=2.0) #zz
+
 postprocessor = PostProcess(select_box_nums_for_evaluation=300)
 
 # combine above components to instantiate the model
