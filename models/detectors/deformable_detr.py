@@ -41,7 +41,7 @@ class DeformableDETR(DETRDetector):
         multi_levels = self.get_multi_levels(images, mask)
         multi_level_feats, multi_level_masks, multi_level_pos_embeds = multi_levels
 
-        outputs_class, outputs_coord, enc_class, enc_coord, group_outputs_weights = self.transformer(
+        outputs_class, outputs_coord, enc_class, enc_coord, group_outputs_weights = self.transformer( #
             multi_level_feats, multi_level_masks, multi_level_pos_embeds
         )
 
@@ -54,7 +54,7 @@ class DeformableDETR(DETRDetector):
             # compute loss
             loss_dict = self.criterion(output, targets)
             # compute spec loss
-            spec_losses = self.transformer.compute_spec_losses(group_outputs_weights)
+            spec_losses = self.transformer.compute_spec_losses(group_outputs_weights) #
             loss_dict.update(spec_losses)
 
             # loss reweighting

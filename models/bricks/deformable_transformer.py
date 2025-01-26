@@ -38,10 +38,10 @@ class DeformableTransformer(TwostageTransformer):
         self.decoder = decoder
         self.encoder_class_head = nn.Linear(self.embed_dim, num_classes)
         self.encoder_bbox_head = MLP(self.embed_dim, self.embed_dim, 4, 3)
-        self.pos_trans = nn.Linear(self.embed_dim * 2, self.embed_dim)
-        self.pos_trans_norm = nn.LayerNorm(self.embed_dim)
+        # self.pos_trans = nn.Linear(self.embed_dim * 2, self.embed_dim)
+        # self.pos_trans_norm = nn.LayerNorm(self.embed_dim)
 
-        self.group_query_interaction = group_query_interaction
+        self.group_query_interaction = group_query_interaction #
 
         self.init_weights()
 
@@ -55,7 +55,7 @@ class DeformableTransformer(TwostageTransformer):
         nn.init.constant_(self.encoder_bbox_head.layers[-1].bias, 0.0)
 
         # initialize pos_trans
-        nn.init.xavier_uniform_(self.pos_trans.weight)
+        # nn.init.xavier_uniform_(self.pos_trans.weight)
 
     def forward(
         self,
@@ -103,8 +103,8 @@ class DeformableTransformer(TwostageTransformer):
         # )
         # target = self.pos_trans_norm(self.pos_trans(query_sine_embed))
 
-        tgt_embed, group_outputs_weights = self.group_query_interaction(memory)
-        target = tgt_embed.expand(multi_level_feats[0].shape[0], -1, -1)
+        tgt_embed, group_outputs_weights = self.group_query_interaction(memory) #
+        target = tgt_embed.expand(multi_level_feats[0].shape[0], -1, -1) #
 
         # decoder
         outputs_classes, outputs_coords = self.decoder(
@@ -117,7 +117,7 @@ class DeformableTransformer(TwostageTransformer):
             valid_ratios=valid_ratios,
         )
 
-        return outputs_classes, outputs_coords, enc_outputs_class, enc_outputs_coord, group_outputs_weights
+        return outputs_classes, outputs_coords, enc_outputs_class, enc_outputs_coord, group_outputs_weights #
 
     def compute_spec_losses(self, group_weights):
         return self.group_query_interaction.compute_spec_losses(group_weights)
@@ -146,7 +146,7 @@ class DeformableTransformerDecoder(nn.Module):
         self.class_head = nn.ModuleList([copy.deepcopy(class_head) for _ in range(num_layers)])
         self.bbox_head = nn.ModuleList([copy.deepcopy(bbox_head) for _ in range(num_layers)])
 
-        self.position_relation_embedding = PositionRelationEmbedding(16, self.num_heads)
+         #self.position_relation_embedding = PositionRelationEmbedding(16, self.num_heads)
 
         self.init_weights()
 
@@ -214,11 +214,11 @@ class DeformableTransformerDecoder(nn.Module):
                 break
 
             # NOTE: Here we integrate position_relation_embedding into DN-Deformable-DETR
-            src_boxes = tgt_boxes if layer_idx >= 1 else reference_points
-            tgt_boxes = output_coord
-            pos_relation = self.position_relation_embedding(src_boxes, tgt_boxes).flatten(0, 1)
-            if attn_mask is not None:
-                pos_relation.masked_fill_(attn_mask, float("-inf"))
+            # src_boxes = tgt_boxes if layer_idx >= 1 else reference_points
+            # tgt_boxes = output_coord
+            # pos_relation = self.position_relation_embedding(src_boxes, tgt_boxes).flatten(0, 1)
+            # if attn_mask is not None:
+            #     pos_relation.masked_fill_(attn_mask, float("-inf"))
 
             # iterative bounding box refinement
             reference_points = output_coord.detach()
