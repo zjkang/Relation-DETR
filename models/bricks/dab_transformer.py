@@ -21,11 +21,14 @@ class DabTransformer(TwostageTransformer):
         num_classes: int,
         num_feature_levels: int = 4,
         two_stage_num_proposals: int = 300,
+        group_query_interaction: nn.Module = None,
     ):
         super().__init__(num_feature_levels, encoder.embed_dim)
         # model parameters
         self.two_stage_num_proposals = two_stage_num_proposals
         self.num_classes = num_classes
+
+        self.group_query_interaction = group_query_interaction
 
         # model structure
         self.encoder = encoder
@@ -75,7 +78,9 @@ class DabTransformer(TwostageTransformer):
         enc_outputs_coord = enc_outputs_coord.gather(1, topk_index.expand(-1, -1, 4))
 
         # get query(target) and reference points
-        target = torch.gather(output_memory, 1, topk_index.expand(-1, -1, self.embed_dim)).detach()
+        # target = torch.gather(output_memory, 1, topk_index.expand(-1, -1, self.embed_dim)).detach()
+        tgt_embed, group_outputs_weights = self.group_query_interaction(memory) #zz
+        target = tgt_embed.expand(multi_level_feats[0].shape[0], -1, -1) #zz
         reference_points = enc_outputs_coord.detach()
 
         # decoder
@@ -89,7 +94,7 @@ class DabTransformer(TwostageTransformer):
             valid_ratios=valid_ratios,
         )
 
-        return outputs_classes, outputs_coords, enc_outputs_class, enc_outputs_coord
+        return outputs_classes, outputs_coords, enc_outputs_class, enc_outputs_coord, group_outputs_weights
 
 
 DabTransformerEncoderLayer = RelationTransformerEncoderLayer

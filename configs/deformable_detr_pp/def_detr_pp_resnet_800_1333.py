@@ -9,9 +9,12 @@ from models.bricks.deformable_transformer import (
     DeformableTransformerEncoder,
     DeformableTransformerEncoderLayer,
 )
+from models.bricks.dino_transformer import (
+    GroupQueryInteraction,
+)
 from models.bricks.position_encoding import PositionEmbeddingSine
 from models.bricks.post_process import PostProcess
-from models.bricks.set_criterion import SetCriterion
+from models.bricks.set_criterion import SetCriterion, StableHybridSetCriterion
 from models.detectors.deformable_detr import DeformableDETR
 from models.matcher.hungarian_matcher import HungarianMatcher
 from models.necks.channel_mapper import ChannelMapper
@@ -70,6 +73,7 @@ transformer = DeformableTransformer(
     num_classes=num_classes,
     num_feature_levels=num_feature_levels,
     two_stage_num_proposals=num_queries,
+    group_query_interaction=GroupQueryInteraction(embed_dim, num_queries, num_groups=100),
 )
 
 matcher = HungarianMatcher(
@@ -83,15 +87,18 @@ for i in range(transformer.decoder.num_layers - 1):
     aux_weight_dict.update({k + f"_{i}": v for k, v in weight_dict.items()})
 weight_dict.update(aux_weight_dict)
 weight_dict.update({"loss_class_enc": 1, "loss_bbox_enc": 5, "loss_giou_enc": 2})
+weight_dict.update({"loss_spec_diversity": 0.2, "loss_spec_l1": 0.1})
 
-criterion = SetCriterion(
-    num_classes=num_classes,
-    matcher=matcher,
-    weight_dict=weight_dict,
-    alpha=0.25,
-    gamma=2.0,
-    two_stage_binary_cls=True,
-)
+# criterion = SetCriterion(
+#     num_classes=num_classes,
+#     matcher=matcher,
+#     weight_dict=weight_dict,
+#     alpha=0.25,
+#     gamma=2.0,
+#     two_stage_binary_cls=True,
+# )
+criterion = StableHybridSetCriterion(
+    num_classes, matcher=matcher, weight_dict=weight_dict, alpha=0.25, gamma=2.0, two_stage_binary_cls=True)
 postprocessor = PostProcess(select_box_nums_for_evaluation=300)
 
 # combine above components to instantiate the model

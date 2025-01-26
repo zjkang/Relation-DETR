@@ -26,6 +26,7 @@ class DeformableTransformer(TwostageTransformer):
         num_classes: int,
         num_feature_levels: int = 4,
         two_stage_num_proposals: int = 300,
+        group_query_interaction: nn.Module = None,
     ):
         super().__init__(num_feature_levels, encoder.embed_dim)
         # model parameters
@@ -39,6 +40,8 @@ class DeformableTransformer(TwostageTransformer):
         self.encoder_bbox_head = MLP(self.embed_dim, self.embed_dim, 4, 3)
         self.pos_trans = nn.Linear(self.embed_dim * 2, self.embed_dim)
         self.pos_trans_norm = nn.LayerNorm(self.embed_dim)
+
+        self.group_query_interaction = group_query_interaction
 
         self.init_weights()
 
@@ -95,10 +98,13 @@ class DeformableTransformer(TwostageTransformer):
         reference_points = topk_enc_outputs_coord.detach()
         # nn.Linear can not perceive the arrangement order of elements
         # so exchange_xy=True/False does not matter results
-        query_sine_embed = get_sine_pos_embed(
-            reference_points, self.embed_dim // 2, exchange_xy=False
-        )
-        target = self.pos_trans_norm(self.pos_trans(query_sine_embed))
+        # query_sine_embed = get_sine_pos_embed(
+        #     reference_points, self.embed_dim // 2, exchange_xy=False
+        # )
+        # target = self.pos_trans_norm(self.pos_trans(query_sine_embed))
+
+        tgt_embed, group_outputs_weights = self.group_query_interaction(memory)
+        target = tgt_embed.expand(multi_level_feats[0].shape[0], -1, -1)
 
         # decoder
         outputs_classes, outputs_coords = self.decoder(
@@ -111,7 +117,10 @@ class DeformableTransformer(TwostageTransformer):
             valid_ratios=valid_ratios,
         )
 
-        return outputs_classes, outputs_coords, enc_outputs_class, enc_outputs_coord
+        return outputs_classes, outputs_coords, enc_outputs_class, enc_outputs_coord, group_outputs_weights
+
+    def compute_spec_losses(self, group_weights):
+        return self.group_query_interaction.compute_spec_losses(group_weights)
 
 
 class DeformableTransformerDecoder(nn.Module):

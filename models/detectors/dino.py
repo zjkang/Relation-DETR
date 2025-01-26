@@ -86,7 +86,7 @@ class DINO(DNDETRDetector):
             max_gt_num_per_image = None
 
         # feed into transformer
-        outputs_class, outputs_coord, enc_class, enc_coord, group_outputs_weights = self.transformer(
+        outputs_class, outputs_coord, enc_class, enc_coord, group_outputs_weights = self.transformer( #zz
             multi_level_feats,
             multi_level_masks,
             multi_level_pos_embeds,

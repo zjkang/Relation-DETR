@@ -24,7 +24,7 @@ class DINOTransformer(TwostageTransformer):
         num_classes: int,
         num_feature_levels: int = 4,
         two_stage_num_proposals: int = 900,
-        group_query_interaction: nn.Module = None,
+        group_query_interaction: nn.Module = None, #zz
     ):
         super().__init__(num_feature_levels, encoder.embed_dim)
         # model parameters
@@ -35,7 +35,7 @@ class DINOTransformer(TwostageTransformer):
         self.encoder = encoder
         self.decoder = decoder
 
-        self.group_query_interaction = group_query_interaction
+        self.group_query_interaction = group_query_interaction #zz
         # self.tgt_embed = nn.Embedding(two_stage_num_proposals, self.embed_dim)
 
         self.encoder_class_head = nn.Linear(self.embed_dim, num_classes)
@@ -95,8 +95,8 @@ class DINOTransformer(TwostageTransformer):
         # get target and reference points
         reference_points = enc_outputs_coord.detach()
 
-        tgt_embed, group_outputs_weights = self.group_query_interaction(memory)
-        target = tgt_embed.expand(multi_level_feats[0].shape[0], -1, -1)
+        tgt_embed, group_outputs_weights = self.group_query_interaction(memory) #zz
+        target = tgt_embed.expand(multi_level_feats[0].shape[0], -1, -1) #zz
         # target = self.tgt_embed.weight.expand(multi_level_feats[0].shape[0], -1, -1)
 
         # combine with noised_label_query and noised_box_query for denoising training
@@ -116,7 +116,7 @@ class DINOTransformer(TwostageTransformer):
             attn_mask=attn_mask,
         )
 
-        return outputs_classes, outputs_coords, enc_outputs_class, enc_outputs_coord, group_outputs_weights
+        return outputs_classes, outputs_coords, enc_outputs_class, enc_outputs_coord, group_outputs_weights #zz
 
     def compute_spec_losses(self, group_weights):
         return self.group_query_interaction.compute_spec_losses(group_weights)

@@ -9,9 +9,12 @@ from models.bricks.dab_transformer import (
     DabTransformerEncoder,
     DabTransformerEncoderLayer,
 )
+from models.bricks.dino_transformer import (
+    GroupQueryInteraction,
+)
 from models.bricks.position_encoding import PositionEmbeddingSine
 from models.bricks.post_process import PostProcess
-from models.bricks.set_criterion import SetCriterion
+from models.bricks.set_criterion import SetCriterion, StableHybridSetCriterion
 from models.detectors.dab_deformable_detr import DabDeformableDETR
 from models.matcher.hungarian_matcher import HungarianMatcher
 from models.necks.channel_mapper import ChannelMapper
@@ -78,6 +81,7 @@ for i in range(transformer.decoder.num_layers - 1):
     aux_weight_dict.update({k + f"_{i}": v for k, v in weight_dict.items()})
 weight_dict.update(aux_weight_dict)
 weight_dict.update({"loss_class_enc": 1, "loss_bbox_enc": 5, "loss_giou_enc": 2})
+weight_dict.update({"loss_spec_diversity": 0.2, "loss_spec_l1": 0.1})
 
 criterion = SetCriterion(
     num_classes=num_classes, matcher=matcher, weight_dict=weight_dict, alpha=0.25, gamma=2.0

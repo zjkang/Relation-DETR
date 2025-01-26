@@ -9,9 +9,12 @@ from models.bricks.dn_transformer import (
     DNTransformerEncoder,
     DNTransformerEncoderLayer,
 )
+from models.bricks.dino_transformer import (
+    GroupQueryInteraction, #zz
+)
 from models.bricks.position_encoding import PositionEmbeddingSine
 from models.bricks.post_process import PostProcess
-from models.bricks.set_criterion import SetCriterion
+from models.bricks.set_criterion import SetCriterion, StableHybridSetCriterion #zz
 from models.detectors.dn_deformable_detr import DNDeformableDETR
 from models.matcher.hungarian_matcher import HungarianMatcher
 from models.necks.channel_mapper import ChannelMapper
