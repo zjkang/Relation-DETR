@@ -6,7 +6,7 @@ from optimizer import param_dict
 
 # Commonly changed training configurations
 num_epochs = 12   # train epochs
-batch_size = 2    # total_batch_size = #GPU x batch_size
+batch_size = 1    # total_batch_size = #GPU x batch_size
 num_workers = 4   # workers for pytorch DataLoader
 pin_memory = True # whether pin_memory for pytorch DataLoader
 print_freq = 50   # frequency to print logs
@@ -32,7 +32,8 @@ test_dataset = CocoDetection(
 
 # model config to train
 # model_path = "configs/relation_detr/relation_detr_resnet50_800_1333.py"
-model_path = "configs/dino_pp/dino_pp_resnet50_800_1333.py"
+#model_path = "configs/dino_pp/dino_pp_resnet50_800_1333.py"
+model_path = "configs/dino_pp/dino_pp_swin_l_800_1333.py"
 
 # specify a checkpoint folder to resume, or a pretrained ".pth" to finetune, for example:
 # checkpoints/relation_detr_resnet50_800_1333/train/2024-03-22-09_38_50
