@@ -376,7 +376,7 @@ class StableHybridSetCriterion(SetCriterion):
         alpha: float = 0.25,
         gamma: float = 2.0,
         two_stage_binary_cls=False,
-        matching_copies=[(2,4),(2,4),(2,4),(2,4),(2,4),(2,4),(1,1)]
+        matching_copies=[(1,4),(1,4),(1,4),(1,4),(1,4),(1,4),(1,1)]
     ):
         """
         Args:

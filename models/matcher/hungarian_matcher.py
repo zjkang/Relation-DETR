@@ -85,7 +85,8 @@ class HungarianMatcher(nn.Module):
 
     @torch.no_grad()
     def forward(
-        self, pred_boxes: Tensor, pred_logits: Tensor, gt_boxes: Tensor, gt_labels: Tensor, gt_copy: int = 1
+        self, pred_boxes: Tensor, pred_logits: Tensor, gt_boxes: Tensor, gt_labels: Tensor, gt_copy: int = 1, 
+        k: int = 3,  # 添加这个参数
     ):
         c = self.calculate_cost(pred_boxes, pred_logits, gt_boxes, gt_labels)
 
