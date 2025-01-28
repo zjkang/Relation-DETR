@@ -612,6 +612,108 @@ class StableHungarianMatcher(HungarianMatcher):
             cost_class, cost_bbox, cost_giou, focal_alpha, focal_gamma, mixed_match)
         self.debug = debug
 
+    # @torch.no_grad()
+    # def forward(
+    #     self,
+    #     pred_boxes: Tensor,
+    #     pred_logits: Tensor,
+    #     gt_boxes: Tensor,
+    #     gt_labels: Tensor,
+    #     gt_copy: int = 1, # lower bound,
+    #     k: int = 3, # upper bound topk
+    # ):
+    #     c = self.calculate_cost(pred_boxes, pred_logits, gt_boxes, gt_labels)
+
+    #     # 如果没有ground truth boxes，返回空的匹配结果
+    #     if len(gt_boxes) == 0:
+    #         return (
+    #             torch.empty(0, dtype=torch.int64, device=pred_boxes.device),
+    #             torch.empty(0, dtype=torch.int64, device=pred_boxes.device)
+    #         )
+
+    #     # single assignment
+    #     if not self.mixed_match:
+    #         indices = linear_sum_assignment(c.cpu())
+    #         # indices[0] = [1, 2]     # queries的索引
+    #         # indices[1] = [0, 1]     # gt_boxes的索引
+    #         return torch.as_tensor(indices[0]), torch.as_tensor(indices[1])
+
+    #     # mixed assignment, used in AlignDETR
+    #     gt_size = c.size(-1) # ground truth的数量
+    #     num_queries = len(c)
+    #     if gt_size > 0 and int(num_queries * 0.5 / gt_size) <= gt_copy:
+    #         gt_copy = int(num_queries * 0.5 / gt_size)
+    #         src_ind, tgt_ind = linear_sum_assignment(c.cpu().repeat(1, gt_copy))
+    #         # 还原真实的target索引
+    #         tgt_ind = tgt_ind % gt_size
+    #         # 对target索引排序，并相应调整source索引
+    #         tgt_ind, ind = torch.as_tensor(tgt_ind, dtype=torch.int64).sort()
+    #         src_ind = torch.as_tensor(src_ind, dtype=torch.int64)[ind].view(-1)
+    #         return src_ind, tgt_ind
+
+    #     dynamic_copies, top_k_scores, score_sums = self._get_dynamic_copies(pred_boxes, pred_logits, gt_boxes, gt_labels, gt_copy, k)
+
+    #     # 5. 构建扩展的cost matrix
+    #     expanded_costs = []
+    #     start_indices = [0]
+
+    #     for gt_idx in range(len(gt_boxes)):
+    #         n_copies = dynamic_copies[gt_idx].item()
+    #         expanded_costs.append(c[:, gt_idx:gt_idx+1].repeat(1, n_copies))
+    #         start_indices.append(start_indices[-1] + n_copies)
+
+    #     expanded_costs = torch.cat(expanded_costs, dim=1)
+    #     src_ind, tgt_ind = linear_sum_assignment(expanded_costs.cpu())
+
+    #     src_ind = torch.as_tensor(src_ind, device=expanded_costs.device)
+    #     tgt_ind = torch.as_tensor(tgt_ind, device=expanded_costs.device)
+
+    #     original_gt_indices = torch.zeros_like(tgt_ind)
+    #     for gt_idx in range(len(gt_boxes)):
+    #         start_idx = start_indices[gt_idx]
+    #         end_idx = start_indices[gt_idx + 1]
+    #         mask = (tgt_ind >= start_idx) & (tgt_ind < end_idx)
+    #         original_gt_indices[mask] = gt_idx
+
+    #     # 调试信息
+    #     if self.debug:
+    #         print("\nMatching info:")
+    #         print(f"Number of GTs: {len(gt_boxes)}")
+    #         print("GT details:")
+    #         for gt_idx in range(len(gt_boxes)):
+    #             print(f"GT {gt_idx}:")
+    #             print(f"  - Top-k scores: {top_k_scores[:, gt_idx].tolist()}")
+    #             print(f"  - Score sum: {score_sums[gt_idx]:.3f}")
+    #             print(f"  - Assigned copies: {dynamic_copies[gt_idx].item()}")
+    #             print(f"  - Actual matches: {(original_gt_indices == gt_idx).sum()}")
+
+    #     return src_ind, original_gt_indices
+
+
+    # def _get_dynamic_copies(self, pred_boxes, pred_logits, gt_boxes, gt_labels, gt_copy, k):
+    #     # 计算每个gt的top-k匹配质量，决定copies数量
+    #     out_prob = pred_logits.sigmoid()
+    #     # prob = pred_logits.softmax(-1)  # [num_queries, num_classes]
+    #     scores = out_prob[..., gt_labels]   # [num_queries, num_gt]
+    #     ious = box_iou(
+    #             _box_cxcywh_to_xyxy(pred_boxes),
+    #             _box_cxcywh_to_xyxy(gt_boxes),
+    #         )
+    #     match_scores = ious * (1 - scores)  # [num_queries, num_gt]
+    #     # match_scores = ious * (1 - scores**2)
+
+    #     # 对每个gt，选择top-k个最佳匹配的得分, upper_bound=k
+    #     top_k_scores, _ = match_scores.topk(k=k, dim=0)  # [k, num_gt]
+    #     score_sums = top_k_scores.sum(dim=0) # [num_gt]
+
+    #     gt_copy_tensor = torch.tensor(gt_copy, device=score_sums.device)
+    #     dynamic_copies = torch.maximum(
+    #         gt_copy_tensor,
+    #         torch.ceil(score_sums).long())
+
+    #     return dynamic_copies, top_k_scores, score_sums
+
+
     @torch.no_grad()
     def forward(
         self,
@@ -619,54 +721,70 @@ class StableHungarianMatcher(HungarianMatcher):
         pred_logits: Tensor,
         gt_boxes: Tensor,
         gt_labels: Tensor,
-        gt_copy: int = 1, # lower bound,
-        k: int = 3, # upper bound topk
+        gt_copy: int = 1,
+        k: int = 3,
     ):
+        # 确保所有输入在同一设备上
+        device = pred_boxes.device
+        gt_boxes = gt_boxes.to(device)
+        gt_labels = gt_labels.to(device)
+
         c = self.calculate_cost(pred_boxes, pred_logits, gt_boxes, gt_labels)
 
         # 如果没有ground truth boxes，返回空的匹配结果
         if len(gt_boxes) == 0:
             return (
-                torch.empty(0, dtype=torch.int64, device=pred_boxes.device),
-                torch.empty(0, dtype=torch.int64, device=pred_boxes.device)
+                torch.empty(0, dtype=torch.int64, device=device),
+                torch.empty(0, dtype=torch.int64, device=device)
             )
 
         # single assignment
         if not self.mixed_match:
             indices = linear_sum_assignment(c.cpu())
-            # indices[0] = [1, 2]     # queries的索引
-            # indices[1] = [0, 1]     # gt_boxes的索引
-            return torch.as_tensor(indices[0]), torch.as_tensor(indices[1])
+            return (
+                torch.as_tensor(indices[0], device=device),
+                torch.as_tensor(indices[1], device=device)
+            )
 
-        # mixed assignment, used in AlignDETR
-        gt_size = c.size(-1) # ground truth的数量
+        # mixed assignment
+        gt_size = c.size(-1)
         num_queries = len(c)
+
+        # 使用新变量存储修改后的 gt_copy
+        effective_gt_copy = gt_copy
         if gt_size > 0 and int(num_queries * 0.5 / gt_size) <= gt_copy:
-            gt_copy = int(num_queries * 0.5 / gt_size)
-            src_ind, tgt_ind = linear_sum_assignment(c.cpu().repeat(1, gt_copy))
-            # 还原真实的target索引
+            effective_gt_copy = int(num_queries * 0.5 / gt_size)
+            src_ind, tgt_ind = linear_sum_assignment(c.cpu().repeat(1, effective_gt_copy))
             tgt_ind = tgt_ind % gt_size
-            # 对target索引排序，并相应调整source索引
-            tgt_ind, ind = torch.as_tensor(tgt_ind, dtype=torch.int64).sort()
-            src_ind = torch.as_tensor(src_ind, dtype=torch.int64)[ind].view(-1)
+            tgt_ind, ind = torch.as_tensor(tgt_ind, dtype=torch.int64, device=device).sort()
+            src_ind = torch.as_tensor(src_ind, dtype=torch.int64, device=device)[ind]
             return src_ind, tgt_ind
 
-        dynamic_copies, top_k_scores, score_sums = self._get_dynamic_copies(pred_boxes, pred_logits, gt_boxes, gt_labels, gt_copy, k)
+        # 获取动态copies
+        dynamic_copies, top_k_scores, score_sums = self._get_dynamic_copies(
+            pred_boxes, pred_logits, gt_boxes, gt_labels, effective_gt_copy, k
+        )
 
-        # 5. 构建扩展的cost matrix
+        # 构建扩展的cost matrix
         expanded_costs = []
         start_indices = [0]
+        total_copies = 0
 
         for gt_idx in range(len(gt_boxes)):
             n_copies = dynamic_copies[gt_idx].item()
+            total_copies += n_copies
             expanded_costs.append(c[:, gt_idx:gt_idx+1].repeat(1, n_copies))
             start_indices.append(start_indices[-1] + n_copies)
+
+        # 检查总copies数量
+        if total_copies > num_queries:
+            print(f"Warning: Total copies ({total_copies}) exceeds number of queries ({num_queries})")
 
         expanded_costs = torch.cat(expanded_costs, dim=1)
         src_ind, tgt_ind = linear_sum_assignment(expanded_costs.cpu())
 
-        src_ind = torch.as_tensor(src_ind, device=expanded_costs.device)
-        tgt_ind = torch.as_tensor(tgt_ind, device=expanded_costs.device)
+        src_ind = torch.as_tensor(src_ind, device=device)
+        tgt_ind = torch.as_tensor(tgt_ind, device=device)
 
         original_gt_indices = torch.zeros_like(tgt_ind)
         for gt_idx in range(len(gt_boxes)):
@@ -675,41 +793,62 @@ class StableHungarianMatcher(HungarianMatcher):
             mask = (tgt_ind >= start_idx) & (tgt_ind < end_idx)
             original_gt_indices[mask] = gt_idx
 
-        # 调试信息
-        if self.debug:
-            print("\nMatching info:")
-            print(f"Number of GTs: {len(gt_boxes)}")
-            print("GT details:")
-            for gt_idx in range(len(gt_boxes)):
-                print(f"GT {gt_idx}:")
+            if self.debug:
+                print(f"\nGT {gt_idx}:")
                 print(f"  - Top-k scores: {top_k_scores[:, gt_idx].tolist()}")
                 print(f"  - Score sum: {score_sums[gt_idx]:.3f}")
                 print(f"  - Assigned copies: {dynamic_copies[gt_idx].item()}")
-                print(f"  - Actual matches: {(original_gt_indices == gt_idx).sum()}")
-        if score_sums[gt_idx] >= 3.8:
-            print(f"GT {gt_idx} has more than 3 matches {score_sums[gt_idx]}")
+                print(f"  - Actual matches: {mask.sum().item()}")
+                if score_sums[gt_idx] >= 3.8:
+                    print(f"  - Warning: High score sum {score_sums[gt_idx]:.3f}")
 
         return src_ind, original_gt_indices
 
 
     def _get_dynamic_copies(self, pred_boxes, pred_logits, gt_boxes, gt_labels, gt_copy, k):
-        # 计算每个gt的top-k匹配质量，决定copies数量
-        prob = pred_logits.softmax(-1)  # [num_queries, num_classes]
-        scores = prob[..., gt_labels]   # [num_queries, num_gt]
+        out_prob = pred_logits.sigmoid()
+        scores = out_prob[..., gt_labels]   # [num_queries, num_gt]
+
         ious = box_iou(
-                _box_cxcywh_to_xyxy(pred_boxes),
-                _box_cxcywh_to_xyxy(gt_boxes),
-            )
-        match_scores = ious * (1 - scores)  # [num_queries, num_gt]
-        # match_scores = ious * (1 - scores**2)
+            _box_cxcywh_to_xyxy(pred_boxes),
+            _box_cxcywh_to_xyxy(gt_boxes)
+        )
 
-        # 对每个gt，选择top-k个最佳匹配的得分, upper_bound=k
-        top_k_scores, _ = match_scores.topk(k=k, dim=0)  # [k, num_gt]
-        score_sums = top_k_scores.sum(dim=0) # [num_gt]
+        # 1. 对每个GT，找到同时具有高IoU和高置信度的预测
+        iou_threshold = 0.7
+        score_threshold = 0.5
 
-        gt_copy_tensor = torch.tensor(gt_copy, device=score_sums.device)
-        dynamic_copies = torch.maximum(
-            gt_copy_tensor, 
-            torch.floor(score_sums).long())
+        # 找到同时满足两个条件的预测
+        good_predictions = (ious > iou_threshold) & (scores > score_threshold)  # [num_queries, num_gt]
+        has_good_prediction = good_predictions.any(dim=0)  # [num_gt]
 
-        return dynamic_copies, top_k_scores, score_sums
+        if self.debug:
+            print("\nMatching details:")
+            for i in range(len(gt_labels)):
+                good_pred_indices = good_predictions[:, i].nonzero().squeeze(1)
+                print(f"\nGT {i}:")
+                print(f"Number of good predictions: {len(good_pred_indices)}")
+                if len(good_pred_indices) > 0:
+                    for idx in good_pred_indices:
+                        print(f"  Pred {idx}: IoU={ious[idx, i]:.3f}, Score={scores[idx, i]:.3f}")
+
+        # 2. 计算潜力分数（只对没有好预测的GT）
+        # 建议的gamma值：
+        gamma = 0.5  # 或 0.3, 0.7
+        potential_scores = ious * (1 - scores**gamma)
+
+        # 3. 分配copies
+        top_k_scores, _ = potential_scores.topk(k=k, dim=0)  # [k, num_gt]
+        potential_sums = top_k_scores.sum(dim=0)  # [num_gt]
+
+        gt_copy_tensor = torch.tensor(gt_copy, device=potential_sums.device)
+        dynamic_copies = torch.where(
+            has_good_prediction,
+            gt_copy_tensor,  # 已有好预测，使用基础copy数
+            torch.maximum(
+                gt_copy_tensor,
+                torch.ceil(potential_sums).long()
+            )  # 没有好预测，根据潜力分数增加copies
+        )
+
+        return dynamic_copies, top_k_scores, potential_sums
