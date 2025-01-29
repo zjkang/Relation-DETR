@@ -822,6 +822,9 @@ class StableHungarianMatcher(HungarianMatcher):
         # 找到同时满足两个条件的预测
         good_predictions = (ious > iou_threshold) & (scores > score_threshold)  # [num_queries, num_gt]
         has_good_prediction = good_predictions.any(dim=0)  # [num_gt]
+        
+        bad_predictions = (ious < iou_threshold)  # [num_queries, num_gt]
+        has_bad_prediction = bad_predictions.any(dim=0)  # [num_gt]
 
         if self.debug:
             print("\nMatching details:")
@@ -836,7 +839,8 @@ class StableHungarianMatcher(HungarianMatcher):
         # 2. 计算潜力分数（只对没有好预测的GT）
         # 建议的gamma值：
         gamma = 0.5  # 或 0.3, 0.7
-        potential_scores = ious * (1 - scores**gamma)
+        # potential_scores = ious * (1 - scores**gamma)
+        potential_scores = ious - 0.5 * scores
 
         # 3. 分配copies
         top_k_scores, _ = potential_scores.topk(k=k, dim=0)  # [k, num_gt]
@@ -844,7 +848,7 @@ class StableHungarianMatcher(HungarianMatcher):
 
         gt_copy_tensor = torch.tensor(gt_copy, device=potential_sums.device)
         dynamic_copies = torch.where(
-            has_good_prediction,
+            has_good_prediction | has_bad_prediction,
             gt_copy_tensor,  # 已有好预测，使用基础copy数
             torch.maximum(
                 gt_copy_tensor,
