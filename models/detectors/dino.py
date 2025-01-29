@@ -59,7 +59,9 @@ class DINO(DNDETRDetector):
             box_noise_scale=1.0,
         )
 
-    def forward(self, images: List[Tensor], targets: List[Dict] = None):
+    def forward(self, 
+                images: List[Tensor], 
+                targets: List[Dict] = None):
         # get original image sizes, used for postprocess
         original_image_sizes = self.query_original_sizes(images)
         images, targets, mask = self.preprocess(images, targets)
@@ -128,5 +130,7 @@ class DINO(DNDETRDetector):
                              if k in weight_dict)
             return loss_dict
 
-        detections = self.postprocessor(output, original_image_sizes)
+        # detections = self.postprocessor(output, original_image_sizes)
+
+        detections = [output]
         return detections

@@ -92,7 +92,7 @@ weight_dict.update({"loss_spec_diversity": 0.2, "loss_spec_l1": 0.1})
 # criterion = StableSetCriterion(num_classes, matcher=matcher, weight_dict=weight_dict, alpha=0.25, gamma=2.0)
 criterion = StableHybridSetCriterion(
     num_classes, matcher=matcher, weight_dict=weight_dict, alpha=0.25, gamma=2.0)
-postprocessor = PostProcess(select_box_nums_for_evaluation=300)
+postprocessor = PostProcess(select_box_nums_for_evaluation=900)
 
 # combine above components to instantiate the model
 model = DINO(
