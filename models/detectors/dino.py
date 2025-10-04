@@ -1,5 +1,6 @@
 from typing import Dict, List
 
+import torch
 from torch import Tensor, nn
 
 from models.bricks.denoising import GenerateCDNQueries
@@ -37,11 +38,17 @@ class DINO(DNDETRDetector):
         # model variants
         min_size: int = None,
         max_size: int = None,
+        # Dynamic query generation parameters
+        use_dynamic_queries: bool = True,
+        num_patterns: int = 256,
+        gamma: float = 0.5,
+        beta: float = 0.2,  # Weight for pattern diversity loss
     ):
         super().__init__(min_size, max_size)
         # define model parameters
         self.num_classes = num_classes
         embed_dim = transformer.embed_dim
+        self.beta = beta  # Weight for pattern diversity loss
 
         # define model structures
         self.backbone = backbone
@@ -119,9 +126,23 @@ class DINO(DNDETRDetector):
             loss_dict = self.criterion(output, targets)
             dn_losses = self.compute_dn_loss(dn_metas, targets)
             loss_dict.update(dn_losses)
-            # compute spec loss
-            spec_losses = self.transformer.compute_spec_losses(group_outputs_weights)
-            loss_dict.update(spec_losses)
+            
+            # compute dynamic query losses
+            if hasattr(self.transformer, 'use_dynamic_queries') and self.transformer.use_dynamic_queries:
+                # Pattern diversity loss
+                spec_losses = self.transformer.compute_spec_losses(group_outputs_weights)
+                # Apply beta weight to pattern diversity loss
+                if 'loss_pattern_diversity' in spec_losses:
+                    spec_losses['loss_pattern_diversity'] *= self.beta
+                loss_dict.update(spec_losses)
+                
+                # Quality-aware one-to-many assignment loss (if needed)
+                # This would require ground truth information and prediction outputs
+                # For now, we rely on the existing criterion's one-to-many assignment
+            else:
+                # Fallback to original spec loss computation
+                spec_losses = self.transformer.compute_spec_losses(group_outputs_weights)
+                loss_dict.update(spec_losses)
 
             # loss reweighting
             weight_dict = self.criterion.weight_dict
