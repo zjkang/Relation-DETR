@@ -2,7 +2,7 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Python: Remote Debug",
+            "name": "Remote Main Debug",
             "type": "python",
             "request": "launch",
             "program": "${workspaceFolder}/main.py",

@@ -164,3 +164,4 @@ cython_debug/
 
 # project-related
 checkpoints/
+.DS_Store
