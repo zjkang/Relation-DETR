@@ -8,8 +8,11 @@ import torch.nn.functional as F
 from models.bricks.base_transformer import TwostageTransformer
 from models.bricks.basic import MLP
 from models.bricks.position_encoding import get_sine_pos_embed
-from models.bricks.dynamic_query_modules import DynamicQueryGenerator
-from models.bricks.ms_deform_attn import MultiScaleDeformableAttention
+from models.bricks.relation_transformer import (
+    PositionRelationEmbedding,
+    RelationTransformerDecoderLayer,
+    RelationTransformerEncoderLayer,
+)
 from util.misc import inverse_sigmoid
 
 
@@ -21,33 +24,19 @@ class DINOTransformer(TwostageTransformer):
         num_classes: int,
         num_feature_levels: int = 4,
         two_stage_num_proposals: int = 900,
-        # Dynamic query generation parameters
-        use_dynamic_queries: bool = True,
-        num_patterns: int = 150,
-        gamma: float = 0.5,
+        group_query_interaction: nn.Module = None,
     ):
         super().__init__(num_feature_levels, encoder.embed_dim)
         # model parameters
         self.two_stage_num_proposals = two_stage_num_proposals
         self.num_classes = num_classes
-        self.use_dynamic_queries = use_dynamic_queries
 
         # model structure
         self.encoder = encoder
         self.decoder = decoder
 
-        # Dynamic query generation framework
-        if use_dynamic_queries:
-            self.dynamic_query_generator = DynamicQueryGenerator(
-                embed_dim=encoder.embed_dim,
-                num_queries=two_stage_num_proposals,
-                num_patterns=num_patterns,
-                num_scales=num_feature_levels,
-                gamma=gamma
-            )
-        else:
-            # If dynamic queries are disabled, use simple learnable queries
-            self.dynamic_query_generator = None
+        self.group_query_interaction = group_query_interaction
+        # self.tgt_embed = nn.Embedding(two_stage_num_proposals, self.embed_dim)
 
         self.encoder_class_head = nn.Linear(self.embed_dim, num_classes)
         self.encoder_bbox_head = MLP(self.embed_dim, self.embed_dim, 4, 3)
@@ -106,42 +95,16 @@ class DINOTransformer(TwostageTransformer):
         # get target and reference points
         reference_points = enc_outputs_coord.detach()
 
-        # Generate dynamic queries using the new framework
-        if self.use_dynamic_queries and self.dynamic_query_generator is not None:
-            # Convert memory back to multi-scale format for dynamic query generation
-            # memory shape: (B, H*W, C) - need to reshape to multi-scale features
-            batch_size = memory.size(0)
-            embed_dim = memory.size(-1)
-            
-            # Reconstruct multi-scale features from flattened memory
-            multi_scale_memory = []
-            start_idx = 0
-            for level, (h, w) in enumerate(spatial_shapes):
-                h, w = int(h), int(w)  # Convert to int if they are tensors
-                level_size = h * w
-                level_memory = memory[:, start_idx:start_idx + level_size, :]  # (B, H*W, C)
-                level_memory = level_memory.transpose(1, 2).view(batch_size, embed_dim, h, w)  # (B, C, H, W)
-                multi_scale_memory.append(level_memory)
-                start_idx += level_size
-            
-            # Safety check: ensure we processed all memory
-            assert start_idx == memory.size(1), f"Memory size mismatch: {start_idx} != {memory.size(1)}"
-            
-            # Generate dynamic queries
-            content_queries, position_queries, dynamic_weights = self.dynamic_query_generator(multi_scale_memory)
-            target = content_queries
-            group_outputs_weights = dynamic_weights
-        else:
-            # Use simple learnable queries if dynamic queries are disabled
-            target = torch.zeros(multi_level_feats[0].shape[0], self.two_stage_num_proposals, self.embed_dim, 
-                               device=multi_level_feats[0].device, dtype=multi_level_feats[0].dtype)
-            group_outputs_weights = None
+        tgt_embed, group_outputs_weights = self.group_query_interaction(memory)
+        target = tgt_embed.expand(multi_level_feats[0].shape[0], -1, -1)
+        # target = self.tgt_embed.weight.expand(multi_level_feats[0].shape[0], -1, -1)
 
         # combine with noised_label_query and noised_box_query for denoising training
         if noised_label_query is not None and noised_box_query is not None:
             target = torch.cat([noised_label_query, target], 1)
             reference_points = torch.cat([noised_box_query.sigmoid(), reference_points], 1)
 
+        # decoder
         outputs_classes, outputs_coords = self.decoder(
             query=target,
             value=memory,
@@ -156,84 +119,9 @@ class DINOTransformer(TwostageTransformer):
         return outputs_classes, outputs_coords, enc_outputs_class, enc_outputs_coord, group_outputs_weights
 
     def compute_spec_losses(self, group_weights):
-        if self.use_dynamic_queries and self.dynamic_query_generator is not None:
-            # Compute pattern diversity loss using dynamic query generator
-            diversity_loss = self.dynamic_query_generator.compute_diversity_loss()
-            return {"loss_pattern_diversity": diversity_loss}
-        else:
-            # No special losses if dynamic queries are disabled
-            return {}
+        return self.group_query_interaction.compute_spec_losses(group_weights)
 
-
-class DINOTransformerEncoderLayer(nn.Module):
-    def __init__(
-        self,
-        embed_dim=256,
-        d_ffn=1024,
-        dropout=0.1,
-        n_heads=8,
-        activation=nn.ReLU(inplace=True),
-        n_levels=4,
-        n_points=4,
-    ):
-        super().__init__()
-        self.embed_dim = embed_dim
-
-        # self attention
-        self.self_attn = MultiScaleDeformableAttention(embed_dim, n_levels, n_heads, n_points)
-        self.dropout1 = nn.Dropout(dropout)
-        self.norm1 = nn.LayerNorm(embed_dim)
-
-        # ffn
-        self.linear1 = nn.Linear(embed_dim, d_ffn)
-        self.activation = activation
-        self.dropout2 = nn.Dropout(dropout)
-        self.linear2 = nn.Linear(d_ffn, embed_dim)
-        self.dropout3 = nn.Dropout(dropout)
-        self.norm2 = nn.LayerNorm(embed_dim)
-
-        self.init_weights()
-
-    def init_weights(self):
-        # initialize Linear layer
-        nn.init.xavier_uniform_(self.linear1.weight)
-        nn.init.xavier_uniform_(self.linear2.weight)
-
-    @staticmethod
-    def with_pos_embed(tensor, pos):
-        return tensor if pos is None else tensor + pos
-
-    def forward_ffn(self, query):
-        src2 = self.linear2(self.dropout2(self.activation(self.linear1(query))))
-        query = query + self.dropout3(src2)
-        query = self.norm2(query)
-        return query
-
-    def forward(
-        self,
-        query,
-        query_pos,
-        reference_points,
-        spatial_shapes,
-        level_start_index,
-        query_key_padding_mask=None,
-    ):
-        # self attention
-        src2 = self.self_attn(
-            query=self.with_pos_embed(query, query_pos),
-            reference_points=reference_points,
-            value=query,
-            spatial_shapes=spatial_shapes,
-            level_start_index=level_start_index,
-            key_padding_mask=query_key_padding_mask,
-        )
-        query = query + self.dropout1(src2)
-        query = self.norm1(query)
-
-        # ffn
-        query = self.forward_ffn(query)
-
-        return query
+DINOTransformerEncoderLayer = RelationTransformerEncoderLayer
 
 
 class DINOTransformerEncoder(nn.Module):
@@ -356,6 +244,13 @@ class DINOTransformerDecoder(nn.Module):
             if layer_idx == self.num_layers - 1:
                 break
 
+            # # NOTE: Here we integrate position_relation_embedding into DINO
+            # src_boxes = tgt_boxes if layer_idx >= 1 else reference_points
+            # tgt_boxes = output_coord
+            # pos_relation = self.position_relation_embedding(src_boxes, tgt_boxes).flatten(0, 1)
+            # if attn_mask is not None:
+            #     pos_relation.masked_fill_(attn_mask, float("-inf"))
+
             # iterative bounding box refinement
             reference_points = inverse_sigmoid(reference_points.detach())
             reference_points = self.bbox_head[layer_idx](query) + reference_points
@@ -366,96 +261,100 @@ class DINOTransformerDecoder(nn.Module):
         return outputs_classes, outputs_coords
 
 
-class DINOTransformerDecoderLayer(nn.Module):
-    def __init__(
-        self,
-        embed_dim=256,
-        d_ffn=1024,
-        n_heads=8,
-        dropout=0.1,
-        activation=nn.ReLU(inplace=True),
-        n_levels=4,
-        n_points=4,
-    ):
+DINOTransformerDecoderLayer = RelationTransformerDecoderLayer
+
+
+
+class GroupQueryInteraction(nn.Module):
+    def __init__(self, d_model, num_queries, num_groups=300):
         super().__init__()
-        self.embed_dim = embed_dim
-        self.num_heads = n_heads
-        # cross attention
-        self.cross_attn = MultiScaleDeformableAttention(embed_dim, n_levels, n_heads, n_points)
-        self.dropout1 = nn.Dropout(dropout)
-        self.norm1 = nn.LayerNorm(embed_dim)
+        self.d_model = d_model
+        self.num_specialized = num_groups
+        self.num_queries = num_queries
 
-        # self attention
-        self.self_attn = nn.MultiheadAttention(
-            embed_dim, n_heads, dropout=dropout, batch_first=True
+        # 专门化query模板
+        self.specialized_queries = nn.Embedding(num_groups, d_model)
+
+        # 简化的特征处理器
+        self.img_feature_pooling = nn.Sequential(
+            nn.Linear(d_model, 256),
+            nn.ReLU(),
+            nn.Linear(256, d_model)
         )
-        self.dropout2 = nn.Dropout(dropout)
-        self.norm2 = nn.LayerNorm(embed_dim)
 
-        # ffn
-        self.linear1 = nn.Linear(embed_dim, d_ffn)
-        self.activation = activation
-        self.dropout3 = nn.Dropout(dropout)
-        self.linear2 = nn.Linear(d_ffn, embed_dim)
-        self.dropout4 = nn.Dropout(dropout)
-        self.norm3 = nn.LayerNorm(embed_dim)
-
-        self.init_weights()
-
-    def init_weights(self):
-        # initialize self_attention
-        nn.init.xavier_uniform_(self.self_attn.in_proj_weight)
-        nn.init.xavier_uniform_(self.self_attn.out_proj.weight)
-        # initialize Linear layer
-        nn.init.xavier_uniform_(self.linear1.weight)
-        nn.init.xavier_uniform_(self.linear2.weight)
-
-    @staticmethod
-    def with_pos_embed(tensor, pos):
-        return tensor if pos is None else tensor + pos
-
-    def forward_ffn(self, tgt):
-        tgt2 = self.linear2(self.dropout3(self.activation(self.linear1(tgt))))
-        tgt = tgt + self.dropout4(tgt2)
-        tgt = self.norm3(tgt)
-        return tgt
-
-    def forward(
-        self,
-        query,
-        query_pos,
-        reference_points,
-        value,
-        spatial_shapes,
-        level_start_index,
-        self_attn_mask=None,
-        key_padding_mask=None,
-    ):
-        # self attention
-        query_with_pos = key_with_pos = self.with_pos_embed(query, query_pos)
-        query2 = self.self_attn(
-            query=query_with_pos,
-            key=key_with_pos,
-            value=query,
-            attn_mask=self_attn_mask,
-            need_weights=False,
-        )[0]
-        query = query + self.dropout2(query2)
-        query = self.norm2(query)
-
-        # cross attention
-        query2 = self.cross_attn(
-            query=self.with_pos_embed(query, query_pos),
-            reference_points=reference_points,
-            value=value,
-            spatial_shapes=spatial_shapes,
-            level_start_index=level_start_index,
-            key_padding_mask=key_padding_mask,
+        # 从图像特征生成权重的网络
+        self.weight_generator = nn.Sequential(
+            nn.Linear(d_model, d_model),
+            nn.LayerNorm(d_model),
+            nn.ReLU(),
+            nn.Linear(d_model, self.num_queries * self.num_specialized)
         )
-        query = query + self.dropout1(query2)
-        query = self.norm1(query)
 
-        # ffn
-        query = self.forward_ffn(query)
+        nn.init.normal_(self.specialized_queries.weight)
 
-        return query
+    def forward(self, memory, pos=None):
+        bs = memory.shape[0]
+        # 1. 从图像特征生成权重矩阵
+        image_feat = memory.mean(dim=1)  # [bs, d_model]
+        image_feat = self.img_feature_pooling(image_feat)
+
+        # 2. 生成组合权重
+        weights = self.weight_generator(image_feat)
+        weights = weights.view(bs, self.num_queries, self.num_specialized)
+        weights = F.softmax(weights, dim=-1)
+
+        # 使用权重组合组特征
+        enahcned_queries = torch.matmul(weights, self.specialized_queries.weight)  # [bs, num_queries, d_model]
+
+        return enahcned_queries, weights
+
+    def compute_spec_losses(self, group_weights):
+        # 计算specialized queries之间的相似度
+        queries = F.normalize(self.specialized_queries.weight, dim=-1)  # 归一化
+        # 计算余弦相似度
+        similarity = F.cosine_similarity(
+            queries.unsqueeze(1),  # [num_groups, 1, d_model]
+            queries.unsqueeze(0),  # [1, num_groups, d_model]
+            dim=-1
+        )
+        # 400.0: initial value 2.0 testing
+        # 600.0: initial value 3.0
+        # 1000.0: inital value 5.0
+        scale_factor = 600.0
+        # 移除对角线上的自相似度
+        mask = torch.eye(self.num_specialized, device=queries.device)
+        similarity = similarity * (1 - mask)
+        diversity_loss = scale_factor * similarity.abs().sum() / (self.num_specialized * (self.num_specialized - 1))
+
+        # only loss consider similarity > 0.5
+        # threshold = 0.5
+        # high_similarity = F.relu(similarity - threshold)
+        # diversity_loss = scale_factor * high_similarity.sum() / (self.num_specialized * (self.num_specialized - 1))
+
+        # 计算concentration loss：鼓励每个查询更加专注于特定的组
+        # concentration_loss = -(group_weights.max(dim=-1)[0]).mean()
+        # 方案1：Top-k稀疏性损失
+        num_specialized = group_weights.shape[-1]
+        k = int(num_specialized * 0.3)  # 期望的活跃组数
+        top_k_weights, _ = torch.topk(group_weights, k, dim=-1)  # 获取前k个最大权重
+        sparsity_loss = (1 - top_k_weights.sum(dim=-1)).mean()  # 鼓励top-k权重之和接近1
+
+        loss_dict = {
+            "loss_spec_diversity": diversity_loss,
+            "loss_spec_l1": 10 * sparsity_loss
+        }
+        return loss_dict
+
+
+# # 可选：添加diversity loss鼓励不同query的注意力模式不同
+# def diversity_loss(self, attn_weights):
+#     similarity = torch.matmul(attn_weights, attn_weights.transpose(-2, -1))
+#     diversity_loss = torch.triu(similarity, diagonal=1).sum()
+#     return diversity_loss
+
+# # 可选：添加sparsity约束
+# def sparsity_constraint(self, combination_weights):
+#     return torch.norm(combination_weights, p=1)
+
+# 正交约束
+# 对比学习

@@ -151,7 +151,14 @@ class DINO(DNDETRDetector):
                              if k in weight_dict)
             return loss_dict
 
-        # detections = self.postprocessor(output, original_image_sizes)
-
+        # 提供两种输出模式：
+        # 1. 如果需要原始输出（所有queries的预测），返回output
+        # 2. 如果需要后处理结果（筛选后的检测），返回detections
+        
+        # 返回原始输出，包含所有queries的预测
         detections = [output]
+        
+        # 可选：同时运行postprocessor获得处理后的结果
+        # detections = self.postprocessor(output, original_image_sizes)
+        
         return detections
