@@ -111,5 +111,10 @@ class DINO(DNDETRDetector):
                              if k in weight_dict)
             return loss_dict
 
-        detections = self.postprocessor(output, original_image_sizes)
-        return detections
+        # Temporarily commented out for custom post-processing
+        # detections = self.postprocessor(output, original_image_sizes)
+        # return detections
+        
+        # Return raw outputs instead
+        output['original_image_sizes'] = original_image_sizes
+        return [output]
