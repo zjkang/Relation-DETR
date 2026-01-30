@@ -1,0 +1,42 @@
+Log file: gini_results/paq-dino_log_20260129_113310.txt
+Model: paq-dino
+Model path: /root/autodl-tmp/paq-dino/best_ap.pth
+Threshold: 0.3, Samples: 5000
+Device: cuda
+Model loaded
+Dataset: 5000 images
+
+
+============================================================
+Gini: 0.882
+Pareto@20: 0.942
+============================================================
+
+🔍 Self-check: Verify original data is NOT sorted
+   First 10 queries (0-9): [4972.  923. 3865. 1259. 3119. 1514.  745. 1851. 1399. 2650.]
+   Random 10 queries (100-109): [ 81. 157. 143.  66. 160.  86. 153. 120.  72.  83.]
+   Random 10 queries (500-509): [ 2.  3.  3. 11.  1.  6.  2.  4.  5.  3.]
+   Last 10 queries (890-899): [2. 0. 2. 1. 4. 1. 1. 5. 4. 2.]
+
+   Avg (first 10): 2229.70
+   Avg (mid 10): 112.10
+   Avg (last 10): 2.20
+   ⚠️  WARNING: First 10 queries have much higher activation!
+   ⚠️  This might indicate accidental sorting or position bias.
+
+Results saved: gini_results/paq-dino_results_gini_0.882_pareto_0.942.txt
+📊 Plotting Fig.1 (Ranked):
+   Using sorted_counts (descending)
+   Top 5 values: [4972. 3865. 3119. 2650. 1877.]
+   Last 5 values: [0. 0. 0. 0. 0.]
+Ranked plot saved: gini_results/paq-dino_plot_ranked_gini_0.882_pareto_0.942.png
+
+📊 Plotting Fig.2 (Original Query Order):
+   Using activation_counts_np (ORIGINAL order, NOT sorted)
+   First 5 values (index 0-4): [4972.  923. 3865. 1259. 3119.]
+   Middle 5 values (index 450-454): [6. 6. 5. 4. 8.]
+   Last 5 values (index 895-899): [1. 1. 5. 4. 2.]
+   ✓ Confirmed: activation_counts_np ≠ sorted_counts (good!)
+Original plot saved: gini_results/paq-dino_plot_original_gini_0.882_pareto_0.942.png
+
+Done!

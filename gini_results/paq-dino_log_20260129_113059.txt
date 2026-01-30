@@ -1,0 +1,8 @@
+Log file: gini_results/paq-dino_log_20260129_113059.txt
+Model: paq-dino
+Model path: /root/autodl-tmp/paq-dino/best_ap.pth
+Threshold: 0.3, Samples: 5000
+Device: cuda
+Model loaded
+Dataset: 5000 images
+

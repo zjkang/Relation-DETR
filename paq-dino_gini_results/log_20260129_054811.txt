@@ -1,0 +1,16 @@
+Log file: gini_results/log_20260129_054811.txt
+Threshold: 0.5, Samples: 5000
+Device: cuda
+Model loaded
+Dataset: 5000 images
+
+
+============================================================
+Gini: 0.967
+Pareto@20: 0.996
+============================================================
+
+Results saved: gini_results/results_gini_0.967_pareto_0.996.txt
+Plot saved: gini_results/plot_gini_0.967_pareto_0.996.png
+
+Done!

@@ -1,0 +1,6 @@
+Model: orig-dino
+Model path: /root/autodl-tmp/orig-dino/best_ap.pth
+Gini: 0.965
+Pareto@20: 0.988
+Threshold: 0.3
+Samples: 5000

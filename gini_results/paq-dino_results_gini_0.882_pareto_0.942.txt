@@ -1,0 +1,6 @@
+Model: paq-dino
+Model path: /root/autodl-tmp/paq-dino/best_ap.pth
+Gini: 0.882
+Pareto@20: 0.942
+Threshold: 0.3
+Samples: 5000

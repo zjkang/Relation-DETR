@@ -1,0 +1,4 @@
+Gini: 0.979
+Pareto@20: 0.999
+Threshold: 0.6
+Samples: 5000

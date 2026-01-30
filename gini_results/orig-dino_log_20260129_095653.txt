@@ -1,0 +1,19 @@
+Log file: gini_results/orig-dino_log_20260129_095653.txt
+Model: orig-dino
+Model path: /root/autodl-tmp/orig-dino/best_ap.pth
+Threshold: 0.3, Samples: 5000
+Device: cuda
+Model loaded
+Dataset: 5000 images
+
+
+============================================================
+Gini: 0.965
+Pareto@20: 0.988
+============================================================
+
+Results saved: gini_results/orig-dino_results_gini_0.965_pareto_0.988.txt
+Ranked plot saved: gini_results/orig-dino_plot_ranked_gini_0.965_pareto_0.988.png
+Original plot saved: gini_results/orig-dino_plot_original_gini_0.965_pareto_0.988.png
+
+Done!
